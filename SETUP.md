@@ -1,5 +1,10 @@
 # Failure Resolver - Setup Guide
 
+> **Current default runtime:** the Docker image runs the observer-only
+> `observer.py` entrypoint documented in `README.md`. The agent, Qdrant, SQS,
+> model, and robot-action code described below is retained as a legacy
+> prototype and is not started by the default container.
+
 ## Overview
 
 **Failure Resolver** is an autonomous failure detection, analysis, and resolution system for Bellboy robots. It monitors failures from Avidor (via Supabase), searches semantic memory for similar cases, analyzes with GPT-4, executes solutions on the robot, and learns from operator feedback recorded by Sandy's UI.

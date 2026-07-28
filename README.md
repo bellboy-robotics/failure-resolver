@@ -1,41 +1,34 @@
-# Billie Memory Service
+# Failure Resolver
 
-Failure analysis and solution memory system for Billie the robot.
-
-**See [SETUP.md](./SETUP.md) for architecture and detailed setup instructions.**
+The default container is currently a read-only Supabase observer. It subscribes
+to `INSERT` and `UPDATE` changes on `public.failure_events`, then fetches and
+logs only `failure_id`, `sysid`, `flow_id`, and `matcher_status`. It does not
+invoke a model, Qdrant, SQS, or robot actions.
 
 ## Quick Start
 
 ```bash
-# Copy env
 cp .env.example .env
-
-# Edit .env with your ANTHROPIC_API_KEY
-nano .env
-
-# Start service
-docker-compose up --build
-
-# Test
-curl -X POST http://localhost:8000/analyze-failure \
-  -H "Content-Type: application/json" \
-  -d '{"failure_story": "Gripper pressure too high"}'
+docker compose up --build
 ```
 
-## API
+Required server-side values:
 
-- `POST /analyze-failure` — Search memory for similar failures + propose solution
-- `POST /index-solution` — Store new solution from operator
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
 
-See SETUP.md for full API spec.
+Optional values are `FAILURE_EVENTS_TABLE` (default `failure_events`),
+`LOG_LEVEL` (default `INFO`), and `PORT` (default `8000`).
 
-## Stack
+The service exposes:
 
-- LangGraph (agent orchestration)
-- GPT-4 API (OpenAI) (reasoning)
-- Qdrant (semantic search)
-- FastAPI (HTTP service)
+- `GET /health` — liveness and connection state
+- `GET /readyz` — HTTP 200 only while the Realtime subscription is connected
 
-## Phase 2
+The database table must be included in the Supabase `supabase_realtime`
+publication. The service-role key is a server secret and must never be placed in
+a browser or committed to this repository.
 
-Can swap LangGraph for **Hermes Agent** if multi-platform UI needed. Memory structure stays the same.
+The previous agent/memory prototype remains in `main.py` and related modules,
+but it is not imported by the observer container. See [SETUP.md](./SETUP.md) for
+that legacy prototype.

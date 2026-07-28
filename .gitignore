@@ -26,6 +26,15 @@ logs/
 *.sqlite
 .pytest_cache/
 
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+backend.tf
+crash.log
+crash.*.log
+
 # Note: memory/ is tracked in separate failure-resolver-database repo
 # Do NOT ignore these:
 # - memory/index.json

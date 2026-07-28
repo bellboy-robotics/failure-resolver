@@ -1,0 +1,13 @@
+aws_region         = "us-east-1"
+allowed_account_id = "000000000000"
+
+# The project URL is not a secret. Keep the service stopped until the image and
+# Secrets Manager value have both been populated.
+supabase_url = "https://your-project.supabase.co"
+desired_count = 0
+image_digest  = null
+
+# Optional overrides:
+# vpc_cidr          = "10.43.0.0/16"
+# cpu_architecture  = "ARM64"
+# log_retention_days = 14

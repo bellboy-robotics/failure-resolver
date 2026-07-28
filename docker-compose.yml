@@ -1,47 +1,25 @@
-version: '3.8'
-
 services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: failure-resolver-qdrant
-    ports:
-      - "6333:6333"
-    volumes:
-      - qdrant_storage:/qdrant/storage
-    environment:
-      - QDRANT_API_KEY=your-api-key
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  agent:
+  observer:
     build: .
-    container_name: failure-resolver
+    container_name: failure-resolver-observer
     ports:
-      - "8000:8000"
-    volumes:
-      - ./memory:/app/memory
-      - ./logs:/app/logs
+      - "${PORT:-8000}:${PORT:-8000}"
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - BELLBOY_API_KEY=${BELLBOY_API_KEY}
-      - ROBOT_SYSID=${ROBOT_SYSID}
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
-      - DATABASE_URL=sqlite:///./memory/metadata.db
-      - MEMORY_DIR=./memory
-      - LOG_LEVEL=INFO
-    depends_on:
-      - qdrant
-    networks:
-      - default
+      RESOLVER_MODE: observe
+      SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL is required}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY is required}
+      FAILURE_EVENTS_TABLE: ${FAILURE_EVENTS_TABLE:-failure_events}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: ${PORT:-8000}
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-volumes:
-  qdrant_storage:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('PORT', '8000') + '/health', timeout=2).read()",
+        ]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
