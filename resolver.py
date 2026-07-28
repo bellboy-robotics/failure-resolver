@@ -70,6 +70,7 @@ _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESOLUTION_EVENTS = ("INSERT", "UPDATE")
 _FAILURE_ID = "failure_id"
 _RESOLUTION_ID = "resolution_id"
+_COMPLETED_ANALYSIS_STATUS = "completed"
 _MAX_MATCHER_MESSAGE_LENGTH = 800
 _MAX_SUGGESTION_TEXT_LENGTH = 2_000
 _MAX_RETRIEVAL_TURNS = 10
@@ -355,6 +356,12 @@ class FailureResolverProcessor:
             self.state.failures_skipped += 1
             return None
         if _normalized_text(row.get("matcher_status")) != "pending":
+            self.state.failures_skipped += 1
+            return None
+        if (
+            _normalized_text(row.get("analysis_status"))
+            != _COMPLETED_ANALYSIS_STATUS
+        ):
             self.state.failures_skipped += 1
             return None
         if not await self._claim_failure(failure_id):
@@ -822,6 +829,7 @@ class FailureResolverProcessor:
             )
             .eq(_FAILURE_ID, failure_id)
             .eq("matcher_status", "pending")
+            .eq("analysis_status", _COMPLETED_ANALYSIS_STATUS)
             .execute()
         )
         data = getattr(response, "data", None)
@@ -1186,6 +1194,7 @@ class SupabaseAgentRuntime(SupabaseFailureObserver):
             client.table(self.resolver_settings.failure_events_table)
             .select(_FAILURE_ID)
             .eq("matcher_status", "pending")
+            .eq("analysis_status", _COMPLETED_ANALYSIS_STATUS)
             .order("created_at")
             .limit(self.resolver_settings.reconcile_limit)
             .execute()

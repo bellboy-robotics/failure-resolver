@@ -312,6 +312,7 @@ def failure_row() -> dict[str, Any]:
         "description": "The drawer was already open.",
         "failed_step": "Open drawer",
         "reported_cause": "drawer already open",
+        "analysis_status": "completed",
         "matcher_status": "pending",
         "matcher_message": None,
         "resolver_suggestion": None,
@@ -574,6 +575,26 @@ def test_settings_require_agent_mode_and_hide_all_secrets() -> None:
 
 
 @pytest.mark.anyio
+async def test_match_skips_failure_until_analysis_is_completed() -> None:
+    failure = failure_row()
+    failure["analysis_status"] = "analyzing"
+    client = FakeClient({"failure_events": [failure]})
+    agent = FakeAgent()
+    store = FakeMemoryStore()
+    service = processor(client, agent, store)
+
+    match = await service.process_failure(FAILURE_ID)
+
+    assert match is None
+    assert client.tables["failure_events"][0]["matcher_status"] == "pending"
+    assert client.updates == []
+    assert store.index_calls == 0
+    assert agent.choice_calls == []
+    assert agent.retrieval_calls == []
+    assert service.state.failures_skipped == 1
+
+
+@pytest.mark.anyio
 async def test_match_selects_one_existing_id_and_returns_exact_stored_actions(
     tmp_path: Path,
 ) -> None:
@@ -646,6 +667,7 @@ async def test_match_selects_one_existing_id_and_returns_exact_stored_actions(
         "matching",
         "solution_found",
     ]
+    assert ("analysis_status", "completed") in client.updates[0][2]
     assert client.updates[-1][1]["resolver_suggestion"] == (
         persisted["resolver_suggestion"]
     )
@@ -1501,7 +1523,21 @@ async def test_runtime_subscribes_to_both_tables_and_reconciles_changes() -> Non
     }
     assert tables == {"failure_events", "flow_failure_resolutions"}
 
-    client.tables["failure_events"].append(failure_row())
+    pending_reconciliation_query = next(
+        query
+        for query in client.queries
+        if query.table == "failure_events"
+        and query.columns == "failure_id"
+        and ("matcher_status", "pending") in query.filters
+    )
+    assert (
+        "analysis_status",
+        "completed",
+    ) in pending_reconciliation_query.filters
+
+    analyzing_failure = failure_row()
+    analyzing_failure["analysis_status"] = "analyzing"
+    client.tables["failure_events"].append(analyzing_failure)
     failure_channel = next(
         channel
         for channel in client.channels.values()
@@ -1511,6 +1547,14 @@ async def test_runtime_subscribes_to_both_tables_and_reconciles_changes() -> Non
         )
     )
     failure_channel.emit("INSERT", {"failure_id": FAILURE_ID})
+    await wait_until(
+        lambda: runtime.processor.state.failures_skipped == 1
+    )
+    assert client.tables["failure_events"][0]["matcher_status"] == "pending"
+    assert store.index_calls == 0
+
+    client.tables["failure_events"][0]["analysis_status"] = "completed"
+    failure_channel.emit("UPDATE", {"failure_id": FAILURE_ID})
     await wait_until(
         lambda: (
             client.tables["failure_events"][0]["matcher_status"]
