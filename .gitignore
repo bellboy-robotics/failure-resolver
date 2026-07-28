@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.env
+
+# Project
+logs/
+*.db
+*.sqlite
+.pytest_cache/
+
+# Note: memory/ is tracked in separate failure-resolver-database repo
+# Do NOT ignore these:
+# - memory/index.json
+# - memory/failures/*.md
