@@ -840,6 +840,52 @@ async def test_linked_memory_ingestion_failure_is_acknowledged_safely() -> None:
 
 
 @pytest.mark.anyio
+async def test_failed_memory_ingestion_is_retryable_on_later_resolution_event() -> None:
+    linked_failure = failure_row()
+    linked_failure.update(
+        {
+            "memory_status": "pending",
+            "memory_resolution_id": RESOLUTION_ID,
+        }
+    )
+    client = FakeClient(
+        {
+            "failure_events": [linked_failure],
+            "flow_failure_resolutions": [resolution_row()],
+        }
+    )
+    agent = FakeAgent(
+        generalization=generalization(),
+        generalization_error=RuntimeError("transient model failure"),
+    )
+    store = FakeMemoryStore()
+    service = processor(client, agent, store)
+
+    with pytest.raises(RuntimeError, match="transient model failure"):
+        await service.learn_resolution(RESOLUTION_ID)
+
+    assert client.tables["failure_events"][0]["memory_status"] == "failed"
+
+    agent.generalization_error = None
+    result = await service.learn_resolution(RESOLUTION_ID)
+
+    assert result is not None
+    assert result.commit_sha == "abc123"
+    assert [
+        update[1]["memory_status"]
+        for update in client.updates
+        if update[0] == "failure_events"
+    ] == ["ingesting", "failed", "ingesting", "ingested"]
+    retry_claim = client.updates[2]
+    assert ("memory_status", "failed") in retry_claim[2]
+    row = client.tables["failure_events"][0]
+    assert row["memory_status"] == "ingested"
+    assert row["memory_commit_sha"] == "abc123"
+    assert service.state.memory_acks_failed == 1
+    assert service.state.memory_acks_ingested == 1
+
+
+@pytest.mark.anyio
 async def test_ambiguous_rerun_is_not_written_as_actionable_memory() -> None:
     row = resolution_row()
     row["action_runs"] = [
@@ -1021,3 +1067,58 @@ async def test_runtime_subscribes_to_both_tables_and_reconciles_changes() -> Non
     await runtime.stop()
     await task
     assert agent.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_startup_reconciliation_recovers_failed_memory_ingestion() -> None:
+    linked_failure = failure_row()
+    linked_failure.update(
+        {
+            "matcher_status": "no_solution",
+            "memory_status": "failed",
+            "memory_resolution_id": RESOLUTION_ID,
+            "memory_message": "Recovery memory ingestion failed.",
+        }
+    )
+    client = FakeClient(
+        {
+            "failure_events": [linked_failure],
+            "flow_failure_resolutions": [resolution_row()],
+        }
+    )
+    agent = FakeAgent(generalization=generalization())
+    store = FakeMemoryStore(has_source_hash=True)
+
+    async def client_factory(url: str, key: str):
+        return client
+
+    runtime = SupabaseAgentRuntime(
+        settings(),
+        agent=agent,
+        memory_store=store,
+        client_factory=client_factory,
+    )
+    task = asyncio.create_task(runtime.run())
+    await wait_until(
+        lambda: (
+            client.tables["failure_events"][0]["memory_status"] == "ingested"
+        )
+    )
+
+    memory_updates = [
+        update
+        for update in client.updates
+        if update[0] == "failure_events"
+        and "memory_status" in update[1]
+    ]
+    assert [update[1]["memory_status"] for update in memory_updates] == [
+        "ingesting",
+        "ingested",
+    ]
+    assert ("memory_status", "failed") in memory_updates[0][2]
+    assert agent.generalization_calls == []
+    assert store.writes == []
+    assert runtime.processor.state.memory_acks_ingested == 1
+
+    await runtime.stop()
+    await task

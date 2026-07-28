@@ -572,7 +572,11 @@ class FailureResolverProcessor:
             current.get("memory_resolution_id")
         )
         current_status = _normalized_text(current.get("memory_status"))
-        if current_resolution != resolution_id or current_status != "pending":
+        claimable_statuses = {"pending", "failed"}
+        if (
+            current_resolution != resolution_id
+            or current_status not in claimable_statuses
+        ):
             if (
                 current_resolution == resolution_id
                 and current_status in {"ingesting", "ingested"}
@@ -593,7 +597,10 @@ class FailureResolverProcessor:
                 }
             )
             .eq(_FAILURE_ID, failure_id)
-            .eq("memory_status", "pending")
+            # The status read above is part of the compare-and-set. A later
+            # resolution event or cold-start reconciliation can therefore
+            # retry a failed ingestion without racing another worker.
+            .eq("memory_status", current_status)
             .eq("memory_resolution_id", resolution_id)
             .execute()
         )
