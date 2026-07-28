@@ -106,6 +106,92 @@ variable "openai_model" {
   }
 }
 
+variable "resolver_auto_execute" {
+  description = "Opt in to bounded automatic recovery execution. Keep false until the Brain supports guarded $resume_flow and the robot allowlist is reviewed."
+  type        = bool
+  default     = false
+}
+
+variable "recovery_robot_allowlist" {
+  description = "Exact robot sysids allowed to receive automatic recovery commands. Required when resolver_auto_execute is true."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for sysid in var.recovery_robot_allowlist :
+      can(regex("^[A-Za-z0-9-]{1,64}$", trimspace(sysid)))
+    ])
+    error_message = "recovery_robot_allowlist entries must be 1-64 alphanumeric or hyphen characters."
+  }
+}
+
+variable "recovery_max_attempts" {
+  description = "Immutable attempt budget assigned when an automatic recovery session is prepared."
+  type        = number
+  default     = 3
+
+  validation {
+    condition = (
+      floor(var.recovery_max_attempts) == var.recovery_max_attempts &&
+      var.recovery_max_attempts >= 1 &&
+      var.recovery_max_attempts <= 20
+    )
+    error_message = "recovery_max_attempts must be an integer between 1 and 20."
+  }
+}
+
+variable "recovery_command_timeout_seconds" {
+  description = "Maximum time to wait for one correlated robot command response."
+  type        = number
+  default     = 15
+
+  validation {
+    condition     = var.recovery_command_timeout_seconds > 0
+    error_message = "recovery_command_timeout_seconds must be greater than zero."
+  }
+}
+
+variable "recovery_outcome_timeout_seconds" {
+  description = "Maximum time to observe fresh Flow state after the guarded continuation is accepted."
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.recovery_outcome_timeout_seconds > 0
+    error_message = "recovery_outcome_timeout_seconds must be greater than zero."
+  }
+}
+
+variable "recovery_lease_seconds" {
+  description = "Database lease for one claimed recovery attempt; an expired ambiguous attempt becomes terminal unknown."
+  type        = number
+  default     = 300
+
+  validation {
+    condition = (
+      floor(var.recovery_lease_seconds) == var.recovery_lease_seconds &&
+      var.recovery_lease_seconds >= 5 &&
+      var.recovery_lease_seconds <= 900
+    )
+    error_message = "recovery_lease_seconds must be an integer between 5 and 900."
+  }
+}
+
+variable "recovery_reconcile_interval_seconds" {
+  description = "Seconds between bounded automatic recovery reconciliation passes."
+  type        = number
+  default     = 30
+
+  validation {
+    condition = (
+      var.recovery_reconcile_interval_seconds > 0 &&
+      var.recovery_reconcile_interval_seconds < var.recovery_lease_seconds
+    )
+    error_message = "recovery_reconcile_interval_seconds must be greater than zero and shorter than recovery_lease_seconds."
+  }
+}
+
 variable "memory_repo_url" {
   description = "HTTPS Git repository that is the Markdown resolution-memory ground truth."
   type        = string

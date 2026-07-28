@@ -62,6 +62,13 @@ from retrieval import (
     MAX_TOTAL_READ_CHARS,
     MemoryRetrievalIndex,
 )
+from recovery_executor import (
+    RecoveryCoordinator,
+    RecoveryContractError,
+    RecoveryExecutionSettings,
+    SupabaseRecoveryDatabase,
+    rebind_recovery_actions,
+)
 
 
 logger = logging.getLogger("failure_resolver.agent")
@@ -150,6 +157,25 @@ class ResolverSettings:
     connection_check_seconds: float = 1.0
     disconnect_grace_seconds: float = 10.0
     shutdown_timeout_seconds: float = 15.0
+    auto_execute: bool = False
+    recovery_robot_allowlist: tuple[str, ...] = ()
+    recovery_max_attempts: int = 3
+    recovery_command_timeout_seconds: float = 15.0
+    recovery_outcome_timeout_seconds: float = 60.0
+    recovery_lease_seconds: int = 300
+    recovery_reconcile_interval_seconds: float = 30.0
+    recovery_cf_access_client_id: str = field(default="", repr=False)
+    recovery_cf_access_client_secret: str = field(default="", repr=False)
+
+    def __post_init__(self) -> None:
+        # Validate the opt-in execution boundary even when settings are created
+        # directly in tests or deployment code rather than through from_env.
+        recovery = self.recovery_execution_settings()
+        object.__setattr__(
+            self,
+            "recovery_robot_allowlist",
+            recovery.robot_allowlist,
+        )
 
     @classmethod
     def from_env(
@@ -183,6 +209,19 @@ class ResolverSettings:
             "flow_failure_resolutions",
         ).strip()
         schema = environment.get("SUPABASE_SCHEMA", "public").strip()
+        auto_execute = _boolean(
+            environment,
+            "RESOLVER_AUTO_EXECUTE",
+            False,
+        )
+        recovery_allowlist = tuple(
+            part.strip().upper()
+            for part in environment.get(
+                "RECOVERY_ROBOT_ALLOWLIST",
+                "",
+            ).split(",")
+            if part.strip()
+        )
 
         if not url.startswith(("https://", "http://")):
             raise ValueError("SUPABASE_URL must be an http(s) URL")
@@ -250,6 +289,45 @@ class ResolverSettings:
                 "OBSERVER_SHUTDOWN_TIMEOUT_SECONDS",
                 15.0,
             ),
+            auto_execute=auto_execute,
+            recovery_robot_allowlist=recovery_allowlist,
+            recovery_max_attempts=_bounded_int(
+                environment,
+                "RECOVERY_MAX_ATTEMPTS",
+                3,
+                minimum=1,
+                maximum=20,
+            ),
+            recovery_command_timeout_seconds=_positive_float(
+                environment,
+                "RECOVERY_COMMAND_TIMEOUT_SECONDS",
+                15.0,
+            ),
+            recovery_outcome_timeout_seconds=_positive_float(
+                environment,
+                "RECOVERY_OUTCOME_TIMEOUT_SECONDS",
+                60.0,
+            ),
+            recovery_lease_seconds=_bounded_int(
+                environment,
+                "RECOVERY_LEASE_SECONDS",
+                300,
+                minimum=5,
+                maximum=900,
+            ),
+            recovery_reconcile_interval_seconds=_positive_float(
+                environment,
+                "RECOVERY_RECONCILE_INTERVAL_SECONDS",
+                30.0,
+            ),
+            recovery_cf_access_client_id=environment.get(
+                "RECOVERY_CF_ACCESS_CLIENT_ID",
+                "",
+            ).strip(),
+            recovery_cf_access_client_secret=environment.get(
+                "RECOVERY_CF_ACCESS_CLIENT_SECRET",
+                "",
+            ).strip(),
         )
 
     def observer_settings(self) -> ObserverSettings:
@@ -264,6 +342,22 @@ class ResolverSettings:
             connection_check_seconds=self.connection_check_seconds,
             disconnect_grace_seconds=self.disconnect_grace_seconds,
             shutdown_timeout_seconds=self.shutdown_timeout_seconds,
+        )
+
+    def recovery_execution_settings(self) -> RecoveryExecutionSettings:
+        return RecoveryExecutionSettings(
+            enabled=self.auto_execute,
+            robot_allowlist=self.recovery_robot_allowlist,
+            max_attempts=self.recovery_max_attempts,
+            command_timeout_seconds=self.recovery_command_timeout_seconds,
+            outcome_timeout_seconds=self.recovery_outcome_timeout_seconds,
+            lease_seconds=self.recovery_lease_seconds,
+            cf_access_client_id=self.recovery_cf_access_client_id,
+            cf_access_client_secret=self.recovery_cf_access_client_secret,
+            reconcile_limit=self.reconcile_limit,
+            reconcile_interval_seconds=(
+                self.recovery_reconcile_interval_seconds
+            ),
         )
 
 
@@ -411,14 +505,50 @@ class FailureResolverProcessor:
 
             # Deep-copy the immutable source document.  Nothing from the model
             # can enter this executable payload.
-            actions = tuple(
+            remembered_actions = tuple(
                 _suggestion_action(action)
                 for action in selected.dispatched_actions
             )
-            if not actions:
+            if not remembered_actions:
                 raise AgentReasoningError(
                     "Selected memory contains no dispatched actions"
                 )
+            actions = remembered_actions
+            if (
+                remembered_actions[-1].get("command")
+                in ("$rerun", "$resume_flow")
+            ):
+                flow_snapshot = row.get("flow_snapshot")
+                try:
+                    if not isinstance(flow_snapshot, Mapping):
+                        raise RecoveryContractError(
+                            "failure has no complete Flow snapshot"
+                        )
+                    actions = rebind_recovery_actions(
+                        remembered_actions,
+                        flow_snapshot=flow_snapshot,
+                        flow_id=_required_recovery_text(row, "flow_id"),
+                        action_index=_required_recovery_index(
+                            row,
+                            "action_index",
+                        ),
+                        action_command=_required_recovery_text(
+                            row,
+                            "action_command",
+                        ),
+                    )
+                except RecoveryContractError as error:
+                    await self._finish_failure(
+                        failure_id,
+                        "no_solution",
+                        (
+                            "No applicable solution: the remembered recovery "
+                            f"cannot be safely bound to this Flow run "
+                            f"({error})."
+                        ),
+                    )
+                    self.state.no_solution += 1
+                    return None
             suggested_fix = _suggested_fix_text(selected)
             match = FailureMatch(
                 failure_id=failure_id,
@@ -1033,6 +1163,7 @@ class SupabaseAgentRuntime(SupabaseFailureObserver):
         agent: FailureAgent,
         memory_store: MarkdownMemoryStore,
         client_factory: ClientFactory = create_supabase_client,
+        recovery_coordinator: RecoveryCoordinator | None = None,
     ) -> None:
         super().__init__(
             settings.observer_settings(),
@@ -1048,6 +1179,9 @@ class SupabaseAgentRuntime(SupabaseFailureObserver):
         self._resolution_channel: Any | None = None
         self._resolution_subscription_event = asyncio.Event()
         self._resolution_subscription_error: BaseException | None = None
+        self.recovery_coordinator = recovery_coordinator or RecoveryCoordinator(
+            settings.recovery_execution_settings()
+        )
         # The base observer serializes this queue through one worker, which
         # keeps Git writes and status transitions ordered.
         self._fetch_queue = asyncio.Queue(
@@ -1055,16 +1189,35 @@ class SupabaseAgentRuntime(SupabaseFailureObserver):
         )
 
     async def run(self) -> None:
+        await self.recovery_coordinator.start()
         try:
             await super().run()
         finally:
+            await self.recovery_coordinator.stop()
             await self.processor.close()
+
+    async def stop(self) -> None:
+        # Stop command work while the current Supabase client can still record
+        # an interrupted in-flight attempt as unknown.
+        await self.recovery_coordinator.stop()
+        await super().stop()
 
     async def _connect(self) -> None:
         await super()._connect()
         self.processor.client = self._client
+        if self._client is None:
+            raise ConnectionError("Supabase client is unavailable")
+        self.recovery_coordinator.set_database(
+            SupabaseRecoveryDatabase(
+                self._client,
+                failure_events_table=(
+                    self.resolver_settings.failure_events_table
+                ),
+            )
+        )
         await self._connect_resolution_channel()
         await self._enqueue_reconciliation()
+        await self.recovery_coordinator.reconcile()
 
     async def _connect_resolution_channel(self) -> None:
         client = self._client
@@ -1151,12 +1304,19 @@ class SupabaseAgentRuntime(SupabaseFailureObserver):
                 signal.event,
             )
             return
+        # Let an in-flight automatic recovery attach a newly detected
+        # recurrence immediately, before another matcher decision can replace
+        # the session-pinned plan or reset its retry budget.
+        self.recovery_coordinator.notify_failure(signal.failure_id)
         pending_resolution = await self.processor.pending_memory_resolution(
             signal.failure_id
         )
         if pending_resolution is not None:
             await self.processor.learn_resolution(pending_resolution)
         await self.processor.process_failure(signal.failure_id)
+        # A previously unprepared event becomes executable only after the
+        # matcher transaction pins a solution candidate.
+        self.recovery_coordinator.notify_failure(signal.failure_id)
         self.state.rows_fetched += 1
         logger.info(
             "Processed failure change failure_id=%r event=%r",
@@ -1223,6 +1383,7 @@ class SupabaseAgentRuntime(SupabaseFailureObserver):
         channel = self._resolution_channel
         self._resolution_channel = None
         self.processor.client = None
+        self.recovery_coordinator.set_database(None)
         if client is not None and channel is not None:
             try:
                 await client.remove_channel(channel)
@@ -1239,6 +1400,7 @@ class SupabaseAgentRuntime(SupabaseFailureObserver):
         snapshot = self.state.snapshot()
         snapshot["mode"] = "agent"
         snapshot.update(self.processor.state.snapshot())
+        snapshot.update(self.recovery_coordinator.snapshot())
         return snapshot
 
 
@@ -1562,6 +1724,30 @@ def _suggestion_action(action: Mapping[str, Any]) -> Mapping[str, Any]:
     }
 
 
+def _required_recovery_text(
+    row: Mapping[str, Any],
+    field_name: str,
+) -> str:
+    value = row.get(field_name)
+    if not isinstance(value, str) or not value or value.strip() != value:
+        raise RecoveryContractError(
+            f"failure {field_name} is missing or invalid"
+        )
+    return value
+
+
+def _required_recovery_index(
+    row: Mapping[str, Any],
+    field_name: str,
+) -> int:
+    value = row.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise RecoveryContractError(
+            f"failure {field_name} is missing or invalid"
+        )
+    return value
+
+
 def _retrieval_no_solution(
     documents: Iterable[MemoryDocument],
     reason: str,
@@ -1703,6 +1889,44 @@ def _positive_int(
     if value <= 0 or value > 10_000:
         raise ValueError(f"{name} must be between 1 and 10000")
     return value
+
+
+def _bounded_int(
+    environment: Mapping[str, str],
+    name: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw_value = environment.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+    if value < minimum or value > maximum:
+        raise ValueError(
+            f"{name} must be between {minimum} and {maximum}"
+        )
+    return value
+
+
+def _boolean(
+    environment: Mapping[str, str],
+    name: str,
+    default: bool,
+) -> bool:
+    raw_value = environment.get(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().casefold()
+    if normalized in ("true", "1", "yes", "on"):
+        return True
+    if normalized in ("false", "0", "no", "off"):
+        return False
+    raise ValueError(f"{name} must be a boolean")
 
 
 AgentFactory = Callable[[ResolverSettings], FailureAgent]

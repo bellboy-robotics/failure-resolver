@@ -23,6 +23,7 @@ from agent import (
     ResolutionGeneralization,
 )
 from memory_store import MemoryDocument, MemoryWriteResult
+from recovery_executor import RecoveryExecutionState
 from resolver import (
     FailureResolverProcessor,
     ResolverSettings,
@@ -299,6 +300,41 @@ class FakeMemoryStore:
         )
 
 
+class FakeRecoveryCoordinator:
+    def __init__(self) -> None:
+        self.state = RecoveryExecutionState()
+        self.started = False
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.reconcile_calls = 0
+        self.databases: list[Any] = []
+        self.failure_ids: list[str] = []
+
+    async def start(self) -> None:
+        if self.started:
+            return
+        self.started = True
+        self.start_calls += 1
+
+    async def stop(self) -> None:
+        if not self.started:
+            return
+        self.started = False
+        self.stop_calls += 1
+
+    def set_database(self, database: Any) -> None:
+        self.databases.append(database)
+
+    async def reconcile(self) -> None:
+        self.reconcile_calls += 1
+
+    def notify_failure(self, failure_id: str) -> None:
+        self.failure_ids.append(failure_id)
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.state.snapshot(enabled=True)
+
+
 def failure_row() -> dict[str, Any]:
     return {
         "failure_id": FAILURE_ID,
@@ -308,6 +344,7 @@ def failure_row() -> dict[str, Any]:
         "flow_name": "Open room drawer",
         "flow_status": "error",
         "failure_kind": "action_failed",
+        "action_index": 4,
         "action_command": "open_drawer",
         "description": "The drawer was already open.",
         "failed_step": "Open drawer",
@@ -327,6 +364,38 @@ def failure_row() -> dict[str, Any]:
         "map_id": 39,
         "map_name": "BILLIE-17-OFFICE",
         "map_observed_at": "2026-07-28T17:59:58Z",
+        "flow_snapshot": {
+            "id": "flow-room-101",
+            "status": "paused",
+            "current_action_index": 4,
+            "areas": [
+                {
+                    "name": "Closet",
+                    "items": [
+                        {
+                            "name": "Drawer",
+                            "actions": [
+                                {
+                                    "command": "approach_drawer",
+                                    "action_index": 3,
+                                    "status": "done",
+                                },
+                                {
+                                    "command": "open_drawer",
+                                    "action_index": 4,
+                                    "status": "aborted",
+                                },
+                                {
+                                    "command": "close_drawer",
+                                    "action_index": 5,
+                                    "status": "not_started",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
         "sanitized_context": {
             "flow": {"site": "Office", "room": "101"},
             "action": {"area_name": "Closet", "item_name": "Drawer"},
@@ -416,7 +485,15 @@ def resolution_row(
                     "retried_action": {
                         "command": "open_drawer",
                         "actionIndex": 4,
-                    }
+                        "areaName": "Closet",
+                        "itemName": "Drawer",
+                    },
+                    "expected_next_action": {
+                        "command": "close_drawer",
+                        "actionIndex": 5,
+                        "areaName": "Closet",
+                        "itemName": "Drawer",
+                    },
                 },
             },
             {
@@ -607,11 +684,19 @@ async def test_match_selects_one_existing_id_and_returns_exact_stored_actions(
             "sent_at": "2026-07-28T18:00:15Z",
             "state_before": {"status": "error"},
             "retry_context": {
-                "retried_action": {
-                    "command": "open_drawer",
-                    "actionIndex": 4,
-                }
-            },
+                    "retried_action": {
+                        "command": "open_drawer",
+                        "actionIndex": 4,
+                        "areaName": "Closet",
+                        "itemName": "Drawer",
+                    },
+                    "expected_next_action": {
+                        "command": "close_drawer",
+                        "actionIndex": 5,
+                        "areaName": "Closet",
+                        "itemName": "Drawer",
+                    },
+                },
         },
     )
     document = memory_document(tmp_path, actions=source_actions)
@@ -643,7 +728,15 @@ async def test_match_selects_one_existing_id_and_returns_exact_stored_actions(
                 "retried_action": {
                     "command": "open_drawer",
                     "actionIndex": 4,
-                }
+                    "areaName": "Closet",
+                    "itemName": "Drawer",
+                },
+                "expected_next_action": {
+                    "command": "close_drawer",
+                    "actionIndex": 5,
+                    "areaName": "Closet",
+                    "itemName": "Drawer",
+                },
             },
         },
     )
@@ -691,6 +784,144 @@ async def test_match_selects_one_existing_id_and_returns_exact_stored_actions(
         source_actions[0]["retry_context"]["retried_action"]["command"]
         == "open_drawer"
     )
+
+
+@pytest.mark.anyio
+async def test_match_rebinds_modern_continuation_to_new_flow_run(
+    tmp_path: Path,
+) -> None:
+    old_arguments = {
+        "mode": "retry_current",
+        "rewind_steps": 0,
+        "current_action_index": 4,
+        "current_command": "open_drawer",
+        "flow_id": "old-flow-run",
+    }
+    source_actions = (
+        {
+            "command": "fold",
+            "title": "Fold",
+            "arguments": {"wait": True},
+            "status": "sent",
+        },
+        {
+            "command": "$resume_flow",
+            "title": "Continue",
+            "arguments": old_arguments,
+            "arguments_effective": old_arguments,
+            "explicit_arguments": list(old_arguments),
+            "status": "sent",
+            "continuation_context": {
+                "expected_arguments": old_arguments,
+                "current_action": {
+                    "command": "open_drawer",
+                    "actionIndex": 4,
+                    "areaName": "Closet",
+                    "itemName": "Drawer",
+                },
+                "target_action": {
+                    "command": "open_drawer",
+                    "actionIndex": 4,
+                    "areaName": "Closet",
+                    "itemName": "Drawer",
+                },
+            },
+        },
+    )
+    document = memory_document(tmp_path, actions=source_actions)
+    service = processor(
+        FakeClient({"failure_events": [failure_row()]}),
+        FakeAgent(
+            choice=MemoryChoice(
+                decision="apply_memory",
+                memory_id=RESOLUTION_ID,
+                confidence=0.95,
+                reason="Same drawer failure.",
+            )
+        ),
+        FakeMemoryStore(index={RESOLUTION_ID: document}),
+    )
+
+    match = await service.process_failure(FAILURE_ID)
+
+    assert match is not None
+    assert match.actions[0] == {
+        "command": "fold",
+        "title": "Fold",
+        "arguments": {"wait": True},
+    }
+    rebound = match.actions[-1]
+    assert rebound["arguments"]["flow_id"] == "flow-room-101"
+    assert rebound["arguments"]["current_action_index"] == 4
+    assert (
+        rebound["continuation_context"]["expected_arguments"]
+        == rebound["arguments"]
+    )
+
+
+@pytest.mark.anyio
+async def test_match_rejects_modern_continuation_when_flow_structure_changed(
+    tmp_path: Path,
+) -> None:
+    remembered_arguments = {
+        "mode": "rewind",
+        "rewind_steps": 1,
+        "current_action_index": 4,
+        "current_command": "open_drawer",
+        "flow_id": "old-flow-run",
+    }
+    document = memory_document(
+        tmp_path,
+        actions=(
+            {
+                "command": "$resume_flow",
+                "title": "Rewind",
+                "arguments": remembered_arguments,
+                "status": "sent",
+                "continuation_context": {
+                    "expected_arguments": remembered_arguments,
+                    "current_action": {
+                        "command": "open_drawer",
+                        "actionIndex": 4,
+                        "areaName": "Closet",
+                        "itemName": "Drawer",
+                    },
+                    "target_action": {
+                        "command": "approach_drawer",
+                        "actionIndex": 3,
+                        "areaName": "Closet",
+                        "itemName": "Drawer",
+                    },
+                },
+            },
+        ),
+    )
+    failure = failure_row()
+    failure["flow_snapshot"]["areas"][0]["items"][0]["actions"][0][
+        "command"
+    ] = "approach_cabinet"
+    client = FakeClient({"failure_events": [failure]})
+    service = processor(
+        client,
+        FakeAgent(
+            choice=MemoryChoice(
+                decision="apply_memory",
+                memory_id=RESOLUTION_ID,
+                confidence=0.95,
+                reason="Same drawer failure.",
+            )
+        ),
+        FakeMemoryStore(index={RESOLUTION_ID: document}),
+    )
+
+    match = await service.process_failure(FAILURE_ID)
+
+    assert match is None
+    row = client.tables["failure_events"][0]
+    assert row["matcher_status"] == "no_solution"
+    assert row["resolver_suggestion"] is None
+    assert "cannot be safely bound" in row["matcher_message"]
+    assert "structure differs" in row["matcher_message"]
 
 
 @pytest.mark.anyio
@@ -1583,6 +1814,67 @@ async def test_runtime_subscribes_to_both_tables_and_reconciles_changes() -> Non
     await runtime.stop()
     await task
     assert agent.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_runtime_starts_reconciles_notifies_and_stops_auto_coordinator(
+) -> None:
+    client = FakeClient(
+        {
+            "failure_events": [],
+            "flow_failure_resolutions": [],
+        }
+    )
+    agent = FakeAgent(generalization=generalization())
+    store = FakeMemoryStore()
+    recovery = FakeRecoveryCoordinator()
+
+    async def client_factory(url: str, key: str):
+        return client
+
+    runtime = SupabaseAgentRuntime(
+        settings(
+            auto_execute=True,
+            recovery_robot_allowlist=("BILLIE-16",),
+            recovery_cf_access_client_id="client-id",
+            recovery_cf_access_client_secret="client-secret",
+        ),
+        agent=agent,
+        memory_store=store,
+        client_factory=client_factory,
+        recovery_coordinator=recovery,  # type: ignore[arg-type]
+    )
+    task = asyncio.create_task(runtime.run())
+    await wait_until(lambda: runtime.state.connected)
+
+    assert recovery.start_calls == 1
+    assert recovery.reconcile_calls == 1
+    assert recovery.databases[-1] is not None
+
+    analyzing = failure_row()
+    analyzing["analysis_status"] = "analyzing"
+    client.tables["failure_events"].append(analyzing)
+    failure_channel = next(
+        channel
+        for channel in client.channels.values()
+        if any(
+            binding["table"] == "failure_events"
+            for binding in channel.bindings.values()
+        )
+    )
+    failure_channel.emit("INSERT", {"failure_id": FAILURE_ID})
+    await wait_until(
+        lambda: recovery.failure_ids == [FAILURE_ID, FAILURE_ID]
+    )
+
+    snapshot = runtime.snapshot()
+    assert snapshot["auto_recovery_enabled"] is True
+
+    await runtime.stop()
+    await task
+
+    assert recovery.stop_calls == 1
+    assert recovery.databases[-1] is None
 
 
 @pytest.mark.anyio

@@ -75,7 +75,31 @@ locals {
     },
     {
       name  = "RESOLVER_AUTO_EXECUTE"
-      value = "false"
+      value = tostring(var.resolver_auto_execute)
+    },
+    {
+      name  = "RECOVERY_ROBOT_ALLOWLIST"
+      value = join(",", [for sysid in var.recovery_robot_allowlist : upper(trimspace(sysid))])
+    },
+    {
+      name  = "RECOVERY_MAX_ATTEMPTS"
+      value = tostring(var.recovery_max_attempts)
+    },
+    {
+      name  = "RECOVERY_COMMAND_TIMEOUT_SECONDS"
+      value = tostring(var.recovery_command_timeout_seconds)
+    },
+    {
+      name  = "RECOVERY_OUTCOME_TIMEOUT_SECONDS"
+      value = tostring(var.recovery_outcome_timeout_seconds)
+    },
+    {
+      name  = "RECOVERY_LEASE_SECONDS"
+      value = tostring(var.recovery_lease_seconds)
+    },
+    {
+      name  = "RECOVERY_RECONCILE_INTERVAL_SECONDS"
+      value = tostring(var.recovery_reconcile_interval_seconds)
     },
     {
       name  = "SUPABASE_URL"

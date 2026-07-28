@@ -4,3 +4,4 @@ openai==2.49.0
 pydantic==2.11.7
 supabase==2.31.0
 uvicorn==0.35.0
+websockets>=16,<17

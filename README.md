@@ -14,9 +14,11 @@ memory agent. It:
 - generalizes successful operator-demonstrated resolutions into Markdown; and
 - commits and pushes those memories to the configured repository.
 
-The resolver does **not** dispatch physical robot commands. A selected memory's
-exact demonstrated actions remain data for the downstream recovery boundary.
-Search and model output cannot create or modify those actions.
+Automatic robot execution is disabled by default. When explicitly enabled for
+an allowlisted robot, a separate coordinator claims a database-backed recovery
+session, executes the selected memory's exact demonstrated correction actions
+in order, and sends one guarded `$resume_flow` continuation. Search and model
+output cannot create or modify executable actions.
 
 ## Run locally
 
@@ -47,7 +49,31 @@ The main optional settings are:
 - `MEMORY_REPO_BRANCH` (default `failure-resolver-dev`)
 - `MEMORY_REPO_ROOT` (default
   `/var/lib/failure-resolver/repository`)
+- `RESOLVER_AUTO_EXECUTE` (default `false`)
+- `RECOVERY_ROBOT_ALLOWLIST` (required when auto execution is enabled)
+- `RECOVERY_MAX_ATTEMPTS` (default `3`)
+- `RECOVERY_COMMAND_TIMEOUT_SECONDS` (default `15`)
+- `RECOVERY_OUTCOME_TIMEOUT_SECONDS` (default `60`)
+- `RECOVERY_LEASE_SECONDS` (default `300`; with auto execution enabled,
+  must be at least
+  `10 * RECOVERY_COMMAND_TIMEOUT_SECONDS + RECOVERY_OUTCOME_TIMEOUT_SECONDS + 5`)
+- `RECOVERY_RECONCILE_INTERVAL_SECONDS` (default `30`, must be shorter
+  than the lease)
 - `LOG_LEVEL` and `PORT`
+
+Auto execution also requires server-side
+`RECOVERY_CF_ACCESS_CLIENT_ID` and `RECOVERY_CF_ACCESS_CLIENT_SECRET`.
+When `RESOLVER_AUTO_EXECUTE=true`, build the matching Cloud UI with
+`NEXT_PUBLIC_FAILURE_AUTO_RECOVERY_ENABLED=true`; when it is false, keep the
+Cloud flag false too. The paired PoC flags reserve suggested fixes for the
+automatic worker before its first database claim. A production version should
+replace them with one shared database claim for manual and automatic
+executors.
+Keep it off until the Cloud recovery migration is applied and the target robot
+Brain supports `$resume_flow`. A timeout, disconnect, stale Flow pointer, or
+ambiguous outcome becomes terminal `unknown`; it is not sent again. A
+definitive recurrence of the same failed step consumes another attempt, and
+the final failed attempt becomes `timed_out`.
 
 Compose mounts `/var/lib/failure-resolver` as a named volume so the checkout
 survives container replacement. Markdown Git history remains the authoritative
@@ -68,7 +94,8 @@ state in `failure_events`.
 ```bash
 python -m pip install -r requirements-observer-dev.txt
 python -m pytest -q tests/test_retrieval.py tests/test_agent.py \
-  tests/test_memory_store.py tests/test_observer.py tests/test_resolver.py
+  tests/test_memory_store.py tests/test_observer.py tests/test_resolver.py \
+  tests/test_robot_session.py tests/test_recovery_executor.py
 docker compose config
 docker build -t failure-resolver:local .
 ```

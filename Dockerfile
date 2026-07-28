@@ -33,6 +33,8 @@ COPY --chown=resolver:resolver \
     episode_evidence.py \
     memory_store.py \
     observer.py \
+    recovery_executor.py \
+    robot_session.py \
     retrieval.py \
     resolver.py \
     git-askpass.sh \

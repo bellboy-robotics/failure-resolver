@@ -83,7 +83,7 @@ resource "aws_ecs_task_definition" "service" {
         },
       ]
 
-      secrets = [
+      secrets = concat([
         {
           name      = "SUPABASE_SERVICE_ROLE_KEY"
           valueFrom = "${aws_secretsmanager_secret.runtime.arn}:supabase_service_role_key::"
@@ -96,7 +96,16 @@ resource "aws_ecs_task_definition" "service" {
           name      = "GITHUB_TOKEN"
           valueFrom = "${aws_secretsmanager_secret.runtime.arn}:github_token::"
         },
-      ]
+        ], var.resolver_auto_execute ? [
+        {
+          name      = "RECOVERY_CF_ACCESS_CLIENT_ID"
+          valueFrom = "${aws_secretsmanager_secret.runtime.arn}:recovery_cf_access_client_id::"
+        },
+        {
+          name      = "RECOVERY_CF_ACCESS_CLIENT_SECRET"
+          valueFrom = "${aws_secretsmanager_secret.runtime.arn}:recovery_cf_access_client_secret::"
+        },
+      ] : [])
 
       healthCheck = {
         command = [
@@ -127,6 +136,26 @@ resource "aws_ecs_task_definition" "service" {
         var.task_memory,
       )
       error_message = "task_cpu and task_memory are not a supported Fargate combination."
+    }
+
+    precondition {
+      condition = (
+        !var.resolver_auto_execute ||
+        length(var.recovery_robot_allowlist) > 0
+      )
+      error_message = "recovery_robot_allowlist must contain at least one robot when resolver_auto_execute is true."
+    }
+
+    precondition {
+      condition = (
+        !var.resolver_auto_execute ||
+        var.recovery_lease_seconds >= (
+          10 * var.recovery_command_timeout_seconds +
+          var.recovery_outcome_timeout_seconds +
+          5
+        )
+      )
+      error_message = "recovery_lease_seconds must cover the worst-case 10-command plus Flow-outcome timeout window and safety margin when auto execution is enabled."
     }
   }
 }

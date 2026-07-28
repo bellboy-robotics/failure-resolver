@@ -7,9 +7,8 @@ durable database state on startup, calls OpenAI for bounded reasoning, and
 reads/writes Git-backed Markdown recovery memory.
 
 It intentionally creates no SQS queue, API Gateway, load balancer, public
-listener, NAT gateway, Qdrant service, or robot permissions. The agent updates
-matcher state in Supabase and commits memory, but it does not execute a
-physical recovery.
+listener, NAT gateway, or Qdrant service. Automatic recovery is opt-in,
+restricted to an exact robot allowlist, and disabled by default.
 
 ## Resources
 
@@ -49,6 +48,45 @@ Populate the created secret out of band with this JSON shape:
   "github_token": "replace-me"
 }
 ```
+
+When `resolver_auto_execute = true`, add the Cloudflare Access service-token
+keys used to reach the allowlisted robot WebSockets:
+
+```json
+{
+  "supabase_service_role_key": "replace-me",
+  "openai_api_key": "replace-me",
+  "github_token": "replace-me",
+  "recovery_cf_access_client_id": "replace-me",
+  "recovery_cf_access_client_secret": "replace-me"
+}
+```
+
+Then set an explicit retry policy:
+
+```hcl
+resolver_auto_execute            = true
+recovery_robot_allowlist         = ["BILLIE-16"]
+recovery_max_attempts            = 3
+recovery_command_timeout_seconds = 15
+recovery_outcome_timeout_seconds = 60
+recovery_lease_seconds           = 300
+recovery_reconcile_interval_seconds = 30
+```
+
+Do not enable a robot until its Brain build supports the guarded
+`$resume_flow` request/response contract. The service executes correction
+steps sequentially and exactly once per database claim. The final pinned
+continuation either retries the current Flow step or rewinds the recorded
+number of steps. Ambiguous command outcomes fail closed as `unknown`; a third
+definitive failure with the defaults becomes `timed_out`.
+
+The Cloud UI deployed with this worker must use
+`NEXT_PUBLIC_FAILURE_AUTO_RECOVERY_ENABLED=true` whenever
+`resolver_auto_execute = true`, and false otherwise. This paired PoC setting
+prevents browser-run fixes from racing the automatic worker before the
+recovery lifecycle is visible. It is not a substitute for a shared database
+claim in a production deployment.
 
 For example, pipe a locally constructed JSON document to
 `aws secretsmanager put-secret-value --secret-id "$(terraform output -raw runtime_secret_arn)" --secret-string file:///path/to/secret.json`.
