@@ -1,249 +1,310 @@
-# Billie Memory Service - Setup Guide
+# Failure Resolver - Setup Guide
 
 ## Overview
 
-**Billie Memory Service** is the failure analysis and solution memory system. It receives failure stories from Avidor via **AWS SQS**, searches local semantic memory for similar failures and solutions, and proposes fixes or flags for operator intervention.
+**Failure Resolver** is an autonomous failure detection, analysis, and resolution system for Bellboy robots. It monitors failures from Avidor (via Supabase), searches semantic memory for similar cases, analyzes with GPT-4, executes solutions on the robot, and learns from operator feedback recorded by Sandy's UI.
 
-## Architecture (SQS-Based)
+## Architecture (Supabase-Based)
 
 ```
 Avidor (failure detection)
-  ↓ (puts message → failures-queue)
-AWS SQS (billie-failures)
+  ↓ (inserts row → Supabase failures table)
+Supabase (bellboy-failures)
   ↓
-Billie Memory Service (polls SQS)
-  ├─ Parses robot_id, table_entry_id, failure_story
-  ├─ Searches memory: failures + solutions
-  ├─ Reasons about failure (GPT-4)
-  ├─ Stores result in local cache/DB
-  └─ Deletes message from queue
+Failure Resolver (polls Supabase)
+  ├─ Extract: robot_id, failure_story, context
+  ├─ Search memory: similar failures (Qdrant)
+  ├─ Analyze: GPT-4 reasoning
+  ├─ Execute: commands on robot (Bellboy API)
+  └─ Store: result + analysis
   ↓
-Sandy's UI (reads failure record from DB/cache)
+Sandy's UI (reads failures from Supabase)
   ├─ Shows failure to operator
   ├─ Operator drives robot → creates solution
-  └─ Puts message → solutions-queue
+  └─ Inserts row → Supabase solutions table
   ↓
-AWS SQS (billie-solutions)
-  ↓
-Billie Memory Service (polls SQS)
-  ├─ Indexes solution (embeddings + disk + metadata)
-  ├─ Updates failure record
-  └─ Deletes message from queue
+Failure Resolver (polls Supabase)
+  ├─ Index solution (embeddings + disk)
+  ├─ Update metadata
+  ├─ Store in failure-resolver-database repo
+  └─ Update Supabase with solution link
   ↓
 Memory updated → next similar failure has solution
 ```
 
 **Benefits:**
-- ✅ Robust: Messages not lost if service is down
-- ✅ Decoupled: Services don't call each other directly
-- ✅ Scalable: Multiple workers can poll same queue
-- ✅ Reliable: Built-in retry mechanism
+- ✅ Decoupled: Services via shared Supabase
+- ✅ Scalable: Multiple resolvers can poll independently
+- ✅ Observable: Full audit trail in Supabase
+- ✅ Autonomous: Executes solutions directly on robot
 
-## Technology Stack (Phase 1 - LangGraph)
+## Technology Stack
 
 | Component | Technology | Purpose |
 |---|---|---|
-| **Agent Framework** | LangGraph (LangChain) | Orchestrate agent logic, memory operations |
-| **LLM** | GPT-4 (OpenAI) | Reasoning about failures |
-| **Semantic Memory** | Qdrant (local vector DB) | Embeddings-based failure search |
-| **Metadata Store** | SQLite / PostgreSQL | Failure logs, solution metadata, statistics |
-| **Container** | Docker + Docker Compose | Local dev, eventual cloud deployment |
-| **API** | FastAPI (Python) | HTTP endpoints for Avidor, Sandy integration |
+| **API Framework** | FastAPI (Python) | Service, Supabase polling, endpoints |
+| **Robot Control** | Bellboy HTTP API | Commands to physical robots |
+| **Solution Execution** | SolutionExecutor | Parse and execute command strings |
+| **LLM** | GPT-4 (OpenAI) | Failure analysis and reasoning |
+| **Semantic Search** | Qdrant vector DB | Embeddings-based failure matching |
+| **Embeddings** | sentence-transformers | Generate failure vectors |
+| **Memory** | failure-resolver-database (separate repo) | Persistent failure + solution storage |
+| **Container** | Docker + Docker Compose | Local dev, cloud deployment |
+| **Database** | Supabase (PostgreSQL) | Real-time failure/solution records |
 
 ## Quick Start
 
 ### Prerequisites
 - Docker + Docker Compose
 - Python 3.11+
-- `ANTHROPIC_API_KEY` environment variable (for Claude API)
+- Bellboy account (API key)
+- Supabase project (database + API)
 
 ### Run Locally
 
 ```bash
-cd billie-memory-service
+# 1. Clone and configure
+git clone https://github.com/bellboy-robotics/failure-resolver.git
+cd failure-resolver
 
-# Copy env template
+# 2. Copy environment template
 cp .env.example .env
-# Edit .env and add your ANTHROPIC_API_KEY
 
-# Build and start
+# 3. Edit .env with:
+# - BELLBOY_API_KEY (from Bellboy account)
+# - OPENAI_API_KEY (from OpenAI)
+# - ROBOT_SYSID (e.g., BILLIE-16) - for unit tests only
+# - Supabase credentials (when integrated)
+
+# 4. Start service
 docker-compose up --build
 
-# Test the service
-curl -X POST http://localhost:8000/analyze-failure \
-  -H "Content-Type: application/json" \
-  -d '{"failure_story": "Gripper failed to close, pressure at 120psi"}'
+# 5. Test robot interface
+python3 tests/test_commands.py
+
+# 6. Test memory system
+python3 tests/test_memory_management.py
+
+# 7. Import failure data
+docker exec failure-resolver python3 import_failures.py failures.csv
 ```
 
-## SQS Message Formats
+## Data Flow
 
-### Failures Queue (billie-failures)
-**Message from Avidor:**
+### Failure Detection → Analysis
 
+**Avidor inserts to Supabase:**
 ```json
 {
-  "robot_id": "billie-001",
-  "table_entry_id": 12345,
-  "failure_story": "Robot arm oscillating at joint 3, amplitude increasing",
+  "robot_id": "BILLIE-16",
+  "failure_story": "Current map is expected to be floor4 but is osnn_bl",
+  "context": "Navigation to floor4 failed during routine delivery",
   "robot_state": {
-    "arm_position": [0.5, 1.2, 0.8],
-    "gripper_pressure": 80,
-    "status": "failed"
+    "position": [1.2, 5.6, 3.1],
+    "status": "stuck"
   },
-  "context": "Attempted to pick object during run_id=abc123"
+  "timestamp": "2026-07-28T12:00:00Z"
 }
 ```
 
-**Billie Memory processes this:**
-1. Parses robot_id and table_entry_id
-2. Analyzes failure_story
-3. Searches memory for similar failures + solutions
-4. Stores result locally (keyed by robot_id:table_entry_id)
-5. Deletes message from queue
+**Failure Resolver processes:**
+1. Polls Supabase for new failures (configurable interval)
+2. Extracts robot_id, failure_story, context
+3. Generates embedding (sentence-transformers)
+4. Searches Qdrant for similar failures (semantic search)
+5. Passes to GPT-4 for analysis with context
+6. Stores result + analysis locally
+7. Marks failure as "analyzed" in Supabase
 
-**Result stored locally:**
+### Solution Execution
+
+**If solution exists:**
+1. Extract commands from memory (e.g., `slide_forward(0.5)`)
+2. Parse with SolutionExecutor
+3. Execute on robot via Bellboy API (`POST /robots/{SYSID}/commands`)
+4. Report success/failure back to Supabase
+
+**If no solution or operator override:**
+1. Flag for operator review
+2. Sandy's UI shows failure + context
+3. Operator manually drives robot
+4. Sandy records solution commands
+
+### Solution Learning
+
+**Sandy inserts to Supabase (after operator records solution):**
 ```json
 {
-  "robot_id": "billie-001",
-  "table_entry_id": 12345,
-  "status": "analyzed",
-  "matches": [...],
-  "proposed_solution": {...} or null,
-  "escalate": true/false,
-  "reasoning": "..."
-}
-```
-
----
-
-### Solutions Queue (billie-solutions)
-**Message from Sandy's UI (after operator records solution):**
-
-```json
-{
-  "robot_id": "billie-001",
-  "table_entry_id": 12345,
-  "failure_id": "failure_001",
+  "robot_id": "BILLIE-16",
+  "failure_id": "failure_d02819d9",
   "solution_commands": [
-    "reduce_damping(0.5)",
-    "reset_joint(3)",
+    "slide_forward(0.5)",
     "verify_stability()"
   ],
-  "operator_notes": "Operator reduced damping coefficient from 1.0 to 0.5",
-  "success": true
+  "operator_notes": "Changed map to floor4, navigation successful",
+  "success": true,
+  "timestamp": "2026-07-28T12:05:00Z"
 }
 ```
 
-**Billie Memory processes this:**
-1. Embeds solution (sentence-transformers)
-2. Stores to disk + Qdrant vector store
-3. Updates metadata index
-4. Updates failure record in DB
-5. Deletes message from queue
+**Failure Resolver processes:**
+1. Generate embedding for solution
+2. Store to disk + Qdrant
+3. Update metadata index
+4. Push to failure-resolver-database repo (develop branch for testing, main for production)
+5. Update Supabase with "indexed" status
 
 ---
-
-## REST Endpoints (Optional - for direct integration)
-
-### POST /health
-Health check endpoint.
-
-### POST /analyze-failure (Legacy)
-Direct HTTP endpoint (for compatibility, but SQS is preferred).
-
-### POST /index-solution (Legacy)
-Direct HTTP endpoint (for compatibility, but SQS is preferred).
 
 ## Memory Structure
 
 ```
-memory/
-  ├── failures/
-  │   ├── failure_001.md          # Failure description + metadata
-  │   ├── failure_001_solutions/
-  │   │   ├── solution_a.md       # Command stream + operator notes
-  │   │   └── solution_b.md       # Alternative solution
-  │   └── failure_002.md
-  ├── embeddings.db               # Qdrant vector store
-  ├── metadata.db                 # SQLite: failure logs, statistics
-  └── index.json                  # Embedding IDs, failure ↔ solution links
+memory/ (local)
+├── index.json
+│   └── Metadata: failure_id, command, error, location, etc.
+└── failures/
+    ├── failure_d02819d9.md  # Failure description
+    ├── failure_ee891806.md
+    └── ... (human-readable, version-controlled)
+
+failure-resolver-database/ (separate repo)
+├── develop/
+│   ├── index.json          # Test failure metadata
+│   └── failures/*.md       # Test failure cases
+└── main/
+    ├── index.json          # Production failure metadata
+    └── failures/*.md       # Production failure cases
 ```
 
-Each failure is text-based (markdown) for:
-- ✅ Version control (GitHub backup)
-- ✅ Semantic search via embeddings
-- ✅ Human-readable logs
-- ✅ Easy to extend post-hackathon
+**Why separate repos:**
+- Code commits don't interlace with data backups
+- Database can be managed independently
+- Easy to version control both code and data
+- Supports test (develop) vs production (main) data
 
-## Phase 2 - Future (Optional: Hermes Agent)
-
-If multi-platform operator UI needed (Slack, Discord), can pivot to **Hermes Agent**:
-- Keeps same memory structure
-- Swaps LangGraph for Hermes orchestration
-- Adds platform integrations
-
-For now: **LangGraph is the focus.** Memory structure stays the same.
-
-## Running Tests
-
-```bash
-# Unit tests for memory operations
-pytest tests/
-
-# Integration test: end-to-end failure → solution
-pytest tests/integration/ -v
-
-# Manual test with docker-compose
-docker-compose exec agent pytest
-```
-
-## Deployment (Post-Hackathon)
-
-```bash
-# Build image for cloud
-docker build -t billie-memory-service:latest .
-
-# Push to registry (GCP, AWS, or your choice)
-docker tag billie-memory-service:latest gcr.io/your-project/billie-memory-service:latest
-docker push gcr.io/your-project/billie-memory-service:latest
-
-# Deploy on cloud (Cloud Run, Kubernetes, etc.)
-```
+---
 
 ## Environment Variables
 
 See `.env.example`:
 
-**LLM & Memory:**
+**Required - Bellboy Robot:**
 ```
-OPENAI_API_KEY=sk-...
+BELLBOY_API_KEY=<api-key-from-bellboy>
+ROBOT_SYSID=BILLIE-16              # For unit testing only
+```
+
+**Required - LLM:**
+```
+OPENAI_API_KEY=sk-<your-key>
+```
+
+**Qdrant Vector Database:**
+```
 QDRANT_HOST=qdrant
 QDRANT_PORT=6333
-DATABASE_URL=sqlite:///./memory/metadata.db
+```
+
+**Local Storage:**
+```
 MEMORY_DIR=./memory
+DATABASE_URL=sqlite:///./memory/metadata.db
+```
+
+**Supabase (When Integrated):**
+```
+SUPABASE_URL=https://<project>.supabase.co
+SUPABASE_KEY=<your-api-key>
+FAILURES_TABLE=robot_failures
+SOLUTIONS_TABLE=robot_solutions
+POLL_INTERVAL_SECONDS=5
+```
+
+**Service:**
+```
 LOG_LEVEL=INFO
 PORT=8000
 ```
 
-**AWS SQS:**
+---
+
+## Running Tests
+
+```bash
+# Memory management (no robot required)
+python3 tests/test_memory_management.py
+
+# Robot command execution (requires BELLBOY_API_KEY)
+python3 tests/test_commands.py
+
+# Search functionality (no robot required)
+python3 tests/test_search_success_fail.py
 ```
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=your-access-key
-AWS_SECRET_ACCESS_KEY=your-secret-key
-FAILURES_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789/billie-failures
-SOLUTIONS_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/123456789/billie-solutions
-POLL_INTERVAL_SECONDS=5
+
+## API Endpoints (Direct - Legacy)
+
+For direct integration before Supabase wiring:
+
+**POST /analyze-failure**
+```json
+{
+  "failure_story": "Current map is expected to be floor4 but is osnn_bl",
+  "robot_id": "BILLIE-16"
+}
 ```
+
+**POST /index-solution**
+```json
+{
+  "failure_id": "failure_d02819d9",
+  "solution_commands": ["slide_forward(0.5)"],
+  "operator_notes": "Manual fix"
+}
+```
+
+---
+
+## Integration Checklist
+
+- [ ] Supabase project created with failures + solutions tables
+- [ ] Avidor configured to insert failures into Supabase
+- [ ] BELLBOY_API_KEY configured in .env
+- [ ] OPENAI_API_KEY configured in .env
+- [ ] `docker-compose up` runs without errors
+- [ ] Robot interface test passes (`test_commands.py`)
+- [ ] Memory test passes (`test_memory_management.py`)
+- [ ] Failure data imported (`import_failures.py`)
+- [ ] SQS/Supabase polling integrated in main.py
+- [ ] Sandy's UI wired to Supabase solutions table
+- [ ] Solution execution tested on actual robot
+
+---
+
+## Deployment
+
+```bash
+# Build production image
+docker build -t failure-resolver:latest .
+
+# Push to registry (GCP, AWS, etc.)
+docker tag failure-resolver:latest gcr.io/your-project/failure-resolver:latest
+docker push gcr.io/your-project/failure-resolver:latest
+
+# Deploy (Cloud Run, Kubernetes, etc.)
+# Ensure Supabase credentials are in production .env
+```
+
+---
 
 ## Next Steps
 
 1. ✅ Read this file
-2. ⬜ Run `docker-compose up` locally
-3. ⬜ Test `/analyze-failure` endpoint
-4. ⬜ Wire up Avidor → POST failures
-5. ⬜ Wire up Sandy's UI → POST solutions
-6. ⬜ Build dashboard to visualize memory (failures, solution success rates)
+2. ⬜ Wire up Supabase (failures + solutions tables)
+3. ⬜ Test robot connection (`test_commands.py`)
+4. ⬜ Import failure database
+5. ⬜ Integrate Avidor → Supabase insertion
+6. ⬜ Integrate Sandy's UI → solution recording
+7. ⬜ Run end-to-end test with actual robot
+8. ⬜ Deploy to production
 
----
-
-**Questions?** Check the inline code comments or ask Claude Code.
+**For more details:** See README.md, BRANCHING_STRATEGY.md, DEVELOPMENT_WORKFLOW.md
