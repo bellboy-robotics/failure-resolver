@@ -6,6 +6,9 @@ allowed_account_id = "000000000000"
 supabase_url = "https://your-project.supabase.co"
 desired_count = 0
 image_digest  = null
+openai_model  = "gpt-5.6-luna"
+memory_repo_url    = "https://github.com/bellboy-robotics/failure-resolver-database.git"
+memory_repo_branch = "failure-resolver-dev"
 
 # Optional overrides:
 # vpc_cidr          = "10.43.0.0/16"

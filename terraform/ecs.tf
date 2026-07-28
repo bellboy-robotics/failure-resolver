@@ -21,7 +21,38 @@ resource "aws_ecs_task_definition" "service" {
     cpu_architecture        = var.cpu_architecture
   }
 
+  volume {
+    name = "memory-checkout"
+  }
+
   container_definitions = jsonencode([
+    {
+      name                   = "memory-volume-init"
+      image                  = local.image_reference
+      essential              = false
+      readonlyRootFilesystem = true
+      user                   = "0:0"
+      command = [
+        "sh",
+        "-c",
+        "chown 10001:10001 /var/lib/failure-resolver",
+      ]
+      mountPoints = [
+        {
+          sourceVolume  = "memory-checkout"
+          containerPath = "/var/lib/failure-resolver"
+          readOnly      = false
+        },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.service.name
+          awslogs-region        = var.aws_region
+          awslogs-stream-prefix = "memory-init"
+        }
+      }
+    },
     {
       name                   = "failure-resolver"
       image                  = local.image_reference
@@ -31,16 +62,39 @@ resource "aws_ecs_task_definition" "service" {
       workingDirectory       = "/app"
       stopTimeout            = 30
 
+      dependsOn = [
+        {
+          containerName = "memory-volume-init"
+          condition     = "SUCCESS"
+        },
+      ]
+
       linuxParameters = {
         initProcessEnabled = true
       }
 
       environment = local.runtime_environment
 
+      mountPoints = [
+        {
+          sourceVolume  = "memory-checkout"
+          containerPath = "/var/lib/failure-resolver"
+          readOnly      = false
+        },
+      ]
+
       secrets = [
         {
           name      = "SUPABASE_SERVICE_ROLE_KEY"
           valueFrom = "${aws_secretsmanager_secret.runtime.arn}:supabase_service_role_key::"
+        },
+        {
+          name      = "OPENAI_API_KEY"
+          valueFrom = "${aws_secretsmanager_secret.runtime.arn}:openai_api_key::"
+        },
+        {
+          name      = "GITHUB_TOKEN"
+          valueFrom = "${aws_secretsmanager_secret.runtime.arn}:github_token::"
         },
       ]
 
@@ -60,7 +114,7 @@ resource "aws_ecs_task_definition" "service" {
         options = {
           awslogs-group         = aws_cloudwatch_log_group.service.name
           awslogs-region        = var.aws_region
-          awslogs-stream-prefix = "observer"
+          awslogs-stream-prefix = "resolver"
         }
       }
     },

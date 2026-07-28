@@ -34,8 +34,36 @@ locals {
       value = var.failure_events_table
     },
     {
+      name  = "FLOW_FAILURE_RESOLUTIONS_TABLE"
+      value = "flow_failure_resolutions"
+    },
+    {
+      name  = "GIT_ASKPASS"
+      value = "/app/git-askpass.sh"
+    },
+    {
+      name  = "GIT_TERMINAL_PROMPT"
+      value = "0"
+    },
+    {
       name  = "LOG_LEVEL"
       value = "INFO"
+    },
+    {
+      name  = "MEMORY_REPO_BRANCH"
+      value = var.memory_repo_branch
+    },
+    {
+      name  = "MEMORY_REPO_ROOT"
+      value = "/var/lib/failure-resolver/repository"
+    },
+    {
+      name  = "MEMORY_REPO_URL"
+      value = var.memory_repo_url
+    },
+    {
+      name  = "OPENAI_MODEL"
+      value = var.openai_model
     },
     {
       name  = "PORT"
@@ -43,7 +71,11 @@ locals {
     },
     {
       name  = "RESOLVER_MODE"
-      value = "observe"
+      value = "agent"
+    },
+    {
+      name  = "RESOLVER_AUTO_EXECUTE"
+      value = "false"
     },
     {
       name  = "SUPABASE_URL"

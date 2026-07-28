@@ -1,5 +1,9 @@
 # Integration Guide - Billie Memory Service
 
+> **Legacy prototype guide:** the supported resolver reads Supabase changes
+> directly and does not use SQS. See `README.md` for the current contract. The
+> queue integration below is historical reference only.
+
 ## For Avidor's Failure Detection Service
 
 ### 1. Create SQS Queue

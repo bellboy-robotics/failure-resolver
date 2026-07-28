@@ -1,9 +1,8 @@
 # Failure Resolver - Setup Guide
 
-> **Current default runtime:** the Docker image runs the observer-only
-> `observer.py` entrypoint documented in `README.md`. The agent, Qdrant, SQS,
-> model, and robot-action code described below is retained as a legacy
-> prototype and is not started by the default container.
+> **Legacy prototype guide:** the current Docker image runs `resolver.py` as
+> documented in `README.md`. The Qdrant, SQS, and robot-action architecture
+> below is retained for reference and is not started by the default container.
 
 ## Overview
 

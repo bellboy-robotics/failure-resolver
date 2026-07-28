@@ -1,14 +1,25 @@
 # Failure Resolver
 
-The default container is currently a read-only Supabase observer. It subscribes
-to `INSERT` and `UPDATE` changes on `public.failure_events`, then fetches and
-logs only `failure_id`, `sysid`, `flow_id`, and `matcher_status`. It does not
-invoke a model, Qdrant, SQS, or robot actions.
+The default container runs `resolver.py`, the online Supabase and Markdown
+memory agent. It:
 
-## Quick Start
+- subscribes to `failure_events` and `flow_failure_resolutions`;
+- reconciles pending failures and successful demonstrated resolutions on
+  startup, so Realtime is not the durable queue;
+- changes a pending failure to `matching`, then `solution_found`,
+  `no_solution`, or `failed`;
+- asks OpenAI whether a Git-backed Markdown memory applies;
+- generalizes successful operator-demonstrated resolutions into Markdown; and
+- commits and pushes those memories to the configured repository.
+
+The resolver does **not** dispatch physical robot commands. A selected memory's
+exact demonstrated actions remain data for the downstream recovery boundary.
+
+## Run locally
 
 ```bash
 cp .env.example .env
+# Fill the required secrets in .env.
 docker compose up --build
 ```
 
@@ -16,19 +27,48 @@ Required server-side values:
 
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
+- `OPENAI_API_KEY`
+- `GITHUB_TOKEN`
 
-Optional values are `FAILURE_EVENTS_TABLE` (default `failure_events`),
-`LOG_LEVEL` (default `INFO`), and `PORT` (default `8000`).
+`GITHUB_TOKEN` needs read/write access only to `MEMORY_REPO_URL`. The image
+passes it to Git through `/app/git-askpass.sh`; interactive credential prompts
+are disabled. Never commit `.env` or put these credentials in browser code.
 
-The service exposes:
+The main optional settings are:
 
-- `GET /health` — liveness and connection state
-- `GET /readyz` — HTTP 200 only while the Realtime subscription is connected
+- `OPENAI_MODEL` (default `gpt-5.6-luna`)
+- `FAILURE_EVENTS_TABLE` (default `failure_events`)
+- `FLOW_FAILURE_RESOLUTIONS_TABLE` (default
+  `flow_failure_resolutions`)
+- `MEMORY_REPO_URL`
+- `MEMORY_REPO_BRANCH` (default `failure-resolver-dev`)
+- `MEMORY_REPO_ROOT` (default
+  `/var/lib/failure-resolver/repository`)
+- `LOG_LEVEL` and `PORT`
 
-The database table must be included in the Supabase `supabase_realtime`
-publication. The service-role key is a server secret and must never be placed in
-a browser or committed to this repository.
+Compose mounts `/var/lib/failure-resolver` as a named volume so the checkout
+survives container replacement. Markdown Git history remains the authoritative
+memory; the local checkout can be recreated from the remote.
 
-The previous agent/memory prototype remains in `main.py` and related modules,
-but it is not imported by the observer container. See [SETUP.md](./SETUP.md) for
-that legacy prototype.
+## Health
+
+- `GET /health` — process liveness and resolver counters
+- `GET /readyz` — HTTP 200 only while both Supabase Realtime subscriptions are
+  connected
+
+The tables must be in the `supabase_realtime` publication. The service-role key
+is required because the agent reads both tables and atomically updates matcher
+state in `failure_events`.
+
+## Validate
+
+```bash
+python -m pip install -r requirements-observer-dev.txt
+python -m pytest -q tests/test_agent.py tests/test_memory_store.py \
+  tests/test_observer.py tests/test_resolver.py
+docker compose config
+docker build -t failure-resolver:local .
+```
+
+The older Qdrant/SQS/robot-execution prototype remains in this repository for
+reference, but it is not imported by the default container.

@@ -95,6 +95,43 @@ variable "failure_events_table" {
   }
 }
 
+variable "openai_model" {
+  description = "OpenAI model used for memory generalization and failure matching."
+  type        = string
+  default     = "gpt-5.6-luna"
+
+  validation {
+    condition     = length(trimspace(var.openai_model)) > 0
+    error_message = "openai_model must not be empty."
+  }
+}
+
+variable "memory_repo_url" {
+  description = "HTTPS Git repository that is the Markdown resolution-memory ground truth."
+  type        = string
+  default     = "https://github.com/bellboy-robotics/failure-resolver-database.git"
+
+  validation {
+    condition     = can(regex("^https://github\\.com/[^/]+/[^/]+(?:\\.git)?$", trimspace(var.memory_repo_url)))
+    error_message = "memory_repo_url must be an HTTPS GitHub repository URL."
+  }
+}
+
+variable "memory_repo_branch" {
+  description = "Branch the resolver pulls, commits to, and pushes."
+  type        = string
+  default     = "failure-resolver-dev"
+
+  validation {
+    condition = (
+      can(regex("^[A-Za-z0-9][A-Za-z0-9._/-]*$", trimspace(var.memory_repo_branch))) &&
+      !strcontains(var.memory_repo_branch, "..") &&
+      !strcontains(var.memory_repo_branch, "@{")
+    )
+    error_message = "memory_repo_branch must be a safe Git branch name."
+  }
+}
+
 variable "container_port" {
   description = "Internal health server port; no public listener is created."
   type        = number

@@ -1,13 +1,15 @@
-# Observe-only AWS deployment
+# Failure resolver agent AWS deployment
 
-This Terraform root runs the lightweight failure resolver observer as one
-outbound-only ECS Fargate task. It subscribes directly to Supabase Realtime
-changes on `public.failure_events`.
+This Terraform root runs `resolver.py` as one outbound-only ECS Fargate task.
+It subscribes directly to Supabase Realtime changes on
+`public.failure_events` and `public.flow_failure_resolutions`, reconciles
+durable database state on startup, calls OpenAI for bounded reasoning, and
+reads/writes Git-backed Markdown recovery memory.
 
 It intentionally creates no SQS queue, API Gateway, load balancer, public
-listener, NAT gateway, Qdrant service, or robot permissions. The first
-deployment only proves that the resolver sees persisted failures; it does not
-run the matcher, call an LLM, update Supabase, or execute a recovery.
+listener, NAT gateway, Qdrant service, or robot permissions. The agent updates
+matcher state in Supabase and commits memory, but it does not execute a
+physical recovery.
 
 ## Resources
 
@@ -41,18 +43,23 @@ Leave `desired_count = 0` and `image_digest = null` on the first apply.
 Populate the created secret out of band with this JSON shape:
 
 ```json
-{"supabase_service_role_key":"replace-me"}
+{
+  "supabase_service_role_key": "replace-me",
+  "openai_api_key": "replace-me",
+  "github_token": "replace-me"
+}
 ```
 
 For example, pipe a locally constructed JSON document to
 `aws secretsmanager put-secret-value --secret-id "$(terraform output -raw runtime_secret_arn)" --secret-string file:///path/to/secret.json`.
-Do not put the service-role key in a `.tfvars` file, shell history, Terraform
-state, source control, or the container image.
+Do not put any of these values in a `.tfvars` file, shell history, Terraform
+state, source control, or the container image. The GitHub token should be
+fine-grained and limited to read/write access on the configured memory
+repository.
 
 The service-role key is a PoC bootstrap credential because the existing RLS
 policy only grants browser reads to authenticated Bellboy users. Replace it
-with a narrower machine identity before the resolver gains write or recovery
-capabilities.
+with a narrower machine identity after the PoC.
 
 ## 2. Build and push
 
@@ -106,11 +113,8 @@ aws ecs describe-services \
 aws logs tail "$(terraform output -raw cloudwatch_log_group)" --follow
 ```
 
-An insert or enrichment update to `public.failure_events` should produce a log
-containing only safe routing fields such as `failure_id`, `sysid`, `flow_id`,
-and `matcher_status`. Secret values, failure narratives, robot errors, images,
-and action arguments must not be logged.
-
-Supabase Realtime is a notification path, not a durable work queue. A later
-matcher implementation must add database-backed claiming and startup catch-up
-before this can process failures exactly once across disconnects.
+An insert into `public.failure_events` should advance its matcher status. A
+successful, applied resolution in `public.flow_failure_resolutions` should
+produce or update one Markdown memory commit. Supabase Realtime is only the
+notification path; startup reconciliation covers events missed while the
+service was disconnected.

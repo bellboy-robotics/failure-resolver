@@ -1,16 +1,29 @@
 services:
-  observer:
+  resolver:
     build: .
-    container_name: failure-resolver-observer
+    container_name: failure-resolver
+    command: ["python", "-m", "resolver"]
     ports:
       - "${PORT:-8000}:${PORT:-8000}"
     environment:
-      RESOLVER_MODE: observe
+      RESOLVER_MODE: agent
       SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL is required}
       SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY is required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-luna}
       FAILURE_EVENTS_TABLE: ${FAILURE_EVENTS_TABLE:-failure_events}
+      FLOW_FAILURE_RESOLUTIONS_TABLE: ${FLOW_FAILURE_RESOLUTIONS_TABLE:-flow_failure_resolutions}
+      MEMORY_REPO_URL: ${MEMORY_REPO_URL:-https://github.com/bellboy-robotics/failure-resolver-database.git}
+      MEMORY_REPO_BRANCH: ${MEMORY_REPO_BRANCH:-failure-resolver-dev}
+      MEMORY_REPO_ROOT: ${MEMORY_REPO_ROOT:-/var/lib/failure-resolver/repository}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
+      GIT_ASKPASS: /app/git-askpass.sh
+      GIT_TERMINAL_PROMPT: "0"
+      RESOLVER_AUTO_EXECUTE: "false"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       PORT: ${PORT:-8000}
+    volumes:
+      - resolver-memory:/var/lib/failure-resolver
     healthcheck:
       test:
         [
@@ -23,3 +36,6 @@ services:
       timeout: 3s
       start_period: 10s
       retries: 3
+
+volumes:
+  resolver-memory:
