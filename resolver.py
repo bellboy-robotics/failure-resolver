@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
 import logging
 import os
 import re
@@ -30,7 +29,12 @@ from agent import (
     AgentReasoningError,
     GeneralizationResult,
     MarkdownMemory,
+    MemoryChoice,
     MemoryChoiceResult,
+    MemoryFinishAction,
+    MemoryReadAction,
+    MemoryRetrievalTurnResult,
+    MemorySearchAction,
     OpenAIFailureAgent,
 )
 from episode_evidence import build_episode_evidence
@@ -51,6 +55,13 @@ from observer import (
     _configure_logging,
     create_supabase_client,
 )
+from retrieval import (
+    MAX_READ_DOCUMENTS,
+    MAX_SEARCH_CALLS,
+    MAX_SEARCH_RESULTS,
+    MAX_TOTAL_READ_CHARS,
+    MemoryRetrievalIndex,
+)
 
 
 logger = logging.getLogger("failure_resolver.agent")
@@ -59,9 +70,9 @@ _VALID_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESOLUTION_EVENTS = ("INSERT", "UPDATE")
 _FAILURE_ID = "failure_id"
 _RESOLUTION_ID = "resolution_id"
-_MAX_MATCH_CANDIDATES = 50
 _MAX_MATCHER_MESSAGE_LENGTH = 800
 _MAX_SUGGESTION_TEXT_LENGTH = 2_000
+_MAX_RETRIEVAL_TURNS = 10
 _LOCATION_FIELDS = (
     "site_id",
     "site",
@@ -79,6 +90,12 @@ class FailureAgent(Protocol):
         failure: Mapping[str, Any],
         memories: Sequence[MarkdownMemory],
     ) -> MemoryChoiceResult: ...
+
+    async def next_memory_retrieval_turn(
+        self,
+        failure: Mapping[str, Any],
+        observations: Sequence[Mapping[str, Any]],
+    ) -> MemoryRetrievalTurnResult: ...
 
     async def generalize_resolution(
         self,
@@ -102,6 +119,13 @@ class MarkdownMemoryStore(Protocol):
         *,
         refresh: bool = True,
     ) -> bool: ...
+
+    async def alatest_memory_commit(
+        self,
+        resolution_id: str,
+        *,
+        refresh: bool = True,
+    ) -> str | None: ...
 
     async def awrite_memory(self, draft: MemoryDraft) -> MemoryWriteResult: ...
 
@@ -289,6 +313,12 @@ class FailureMatch:
 
 
 @dataclass(frozen=True)
+class RetrievalOutcome:
+    choice: MemoryChoice
+    documents: tuple[MemoryDocument, ...]
+
+
+@dataclass(frozen=True)
 class ResolutionChangeSignal:
     event: str | None
     resolution_id: str
@@ -335,8 +365,12 @@ class FailureResolverProcessor:
         self.state.last_failure_id = failure_id
         try:
             index = await self.memory_store.arebuild_index(refresh=True)
-            candidates = _ranked_execution_candidates(row, index.values())
-            if not candidates:
+            safe_documents = tuple(
+                document
+                for document in index.values()
+                if _is_safe_execution_candidate(document)
+            )
+            if not safe_documents:
                 await self._finish_failure(
                     failure_id,
                     "no_solution",
@@ -345,17 +379,11 @@ class FailureResolverProcessor:
                 self.state.no_solution += 1
                 return None
 
-            choice_result = await self.agent.choose_memory(
+            retrieval = await self._retrieve_memory_choice(
                 _failure_with_location_context(row),
-                [
-                    MarkdownMemory(
-                        memory_id=document.resolution_id,
-                        markdown=_memory_retrieval_text(document),
-                    )
-                    for document in candidates
-                ],
+                safe_documents,
             )
-            choice = choice_result.choice
+            choice = retrieval.choice
             if choice.decision == "no_solution":
                 await self._finish_failure(
                     failure_id,
@@ -367,7 +395,7 @@ class FailureResolverProcessor:
 
             selected = {
                 document.resolution_id: document
-                for document in candidates
+                for document in retrieval.documents
             }.get(choice.memory_id or "")
             if selected is None or not _is_safe_execution_candidate(selected):
                 raise AgentReasoningError(
@@ -418,6 +446,203 @@ class FailureResolverProcessor:
             )
             raise
 
+    async def _retrieve_memory_choice(
+        self,
+        failure: Mapping[str, Any],
+        documents: Sequence[MemoryDocument],
+    ) -> RetrievalOutcome:
+        """Browse one immutable safe-memory snapshot and fail closed."""
+
+        corpus = await asyncio.to_thread(
+            MemoryRetrievalIndex,
+            {
+                document.resolution_id: document
+                for document in documents
+            },
+        )
+        auto_read = corpus.auto_read_eligibility(
+            max_documents=MAX_READ_DOCUMENTS,
+            max_total_chars=MAX_TOTAL_READ_CHARS,
+        )
+        if auto_read.eligible and auto_read.memory_ids:
+            reads = corpus.read(
+                auto_read.memory_ids,
+                max_documents=MAX_READ_DOCUMENTS,
+                max_total_chars=MAX_TOTAL_READ_CHARS,
+            )
+            choice_result = await self.agent.choose_memory(
+                failure,
+                [
+                    MarkdownMemory(
+                        memory_id=read.memory_id,
+                        markdown=read.markdown,
+                    )
+                    for read in reads
+                ],
+            )
+            by_id = {
+                document.resolution_id: document
+                for document in documents
+            }
+            return RetrievalOutcome(
+                choice=choice_result.choice,
+                documents=tuple(by_id[read.memory_id] for read in reads),
+            )
+
+        observations: list[Mapping[str, Any]] = [
+            {
+                "kind": "corpus",
+                "eligible_memory_count": len(documents),
+                "searches_remaining": MAX_SEARCH_CALLS,
+                "reads_remaining": MAX_READ_DOCUMENTS,
+            }
+        ]
+        discovered_ids: set[str] = set()
+        read_documents: dict[str, MemoryDocument] = {}
+        searches_used = 0
+        read_chars = 0
+        by_id = {
+            document.resolution_id: document
+            for document in documents
+        }
+
+        for _ in range(_MAX_RETRIEVAL_TURNS):
+            result = await self.agent.next_memory_retrieval_turn(
+                failure,
+                observations,
+            )
+            step = result.turn.step
+            if isinstance(step, MemorySearchAction):
+                if searches_used >= MAX_SEARCH_CALLS:
+                    return _retrieval_no_solution(
+                        read_documents.values(),
+                        "The memory search budget was exhausted.",
+                    )
+                searches_used += 1
+                hits = await asyncio.to_thread(
+                    corpus.search,
+                    step.query,
+                    hints=_failure_retrieval_values(failure),
+                    limit=MAX_SEARCH_RESULTS,
+                )
+                discovered_ids.update(hit.memory_id for hit in hits)
+                observations.append(
+                    {
+                        "kind": "search_results",
+                        "query": step.query,
+                        "searches_remaining": MAX_SEARCH_CALLS - searches_used,
+                        "hits": [
+                            {
+                                "memory_id": hit.memory_id,
+                                "score": hit.score,
+                                "matched_fields": list(hit.matched_fields),
+                                "metadata": dict(hit.metadata),
+                                "snippet": hit.snippet,
+                            }
+                            for hit in hits
+                        ],
+                    }
+                )
+                continue
+
+            if isinstance(step, MemoryReadAction):
+                requested = [
+                    memory_id
+                    for memory_id in step.memory_ids
+                    if memory_id not in read_documents
+                ]
+                if not requested:
+                    observations.append(
+                        {
+                            "kind": "read_results",
+                            "documents": [],
+                            "note": "All requested memories were already read.",
+                        }
+                    )
+                    continue
+                if not set(requested).issubset(discovered_ids):
+                    return _retrieval_no_solution(
+                        read_documents.values(),
+                        "The retrieval agent requested an undiscovered memory.",
+                    )
+                remaining_documents = MAX_READ_DOCUMENTS - len(read_documents)
+                remaining_chars = MAX_TOTAL_READ_CHARS - read_chars
+                if (
+                    len(requested) > remaining_documents
+                    or remaining_chars <= 0
+                ):
+                    return _retrieval_no_solution(
+                        read_documents.values(),
+                        "The memory read budget was exhausted.",
+                    )
+                try:
+                    reads = corpus.read(
+                        requested,
+                        max_documents=remaining_documents,
+                        max_total_chars=remaining_chars,
+                    )
+                except ValueError:
+                    return _retrieval_no_solution(
+                        read_documents.values(),
+                        "The memory read budget was exhausted.",
+                    )
+                read_chars += sum(len(read.markdown) for read in reads)
+                for read in reads:
+                    read_documents[read.memory_id] = by_id[read.memory_id]
+                observations.append(
+                    {
+                        "kind": "read_results",
+                        "reads_remaining": (
+                            MAX_READ_DOCUMENTS - len(read_documents)
+                        ),
+                        "documents": [
+                            {
+                                "memory_id": read.memory_id,
+                                "markdown": read.markdown,
+                            }
+                            for read in reads
+                        ],
+                    }
+                )
+                continue
+
+            if not isinstance(step, MemoryFinishAction):
+                raise AgentReasoningError(
+                    "Retrieval agent returned an unsupported operation"
+                )
+            choice = step.choice
+            if (
+                choice.decision == "no_solution"
+                and (searches_used == 0 or not read_documents)
+            ):
+                observations.append(
+                    {
+                        "kind": "retrieval_correction",
+                        "message": (
+                            "Search and read at least one returned memory "
+                            "before concluding that no solution exists."
+                        ),
+                    }
+                )
+                continue
+            if (
+                choice.decision == "apply_memory"
+                and choice.memory_id not in read_documents
+            ):
+                return _retrieval_no_solution(
+                    read_documents.values(),
+                    "The retrieval agent selected an unread memory.",
+                )
+            return RetrievalOutcome(
+                choice=choice,
+                documents=tuple(read_documents.values()),
+            )
+
+        return _retrieval_no_solution(
+            read_documents.values(),
+            "The memory retrieval turn budget was exhausted.",
+        )
+
     async def learn_resolution(
         self,
         resolution_id: str,
@@ -465,13 +690,32 @@ class FailureResolverProcessor:
                 refresh=True,
             ):
                 self.state.resolutions_skipped += 1
+                commit_sha = self._known_commit_shas.get(
+                    source.resolution_id
+                ) or await self.memory_store.alatest_memory_commit(
+                    source.resolution_id,
+                    refresh=False,
+                )
+                if commit_sha is None:
+                    raise AgentReasoningError(
+                        "Existing memory has no Git commit provenance"
+                    )
                 if acknowledgement == "claimed":
                     await self._mark_memory_ingested(
                         failure_id,
                         source.resolution_id,
-                        commit_sha=self._known_commit_shas.get(
-                            source.resolution_id
-                        ),
+                        commit_sha=commit_sha,
+                    )
+                elif _memory_ack_needs_commit_refresh(
+                    linked_failure,
+                    source.resolution_id,
+                    commit_sha,
+                ):
+                    await self._refresh_memory_ingested(
+                        failure_id,
+                        source.resolution_id,
+                        commit_sha=commit_sha,
+                        expected_commit_sha=_memory_ack_commit(linked_failure),
                     )
                 return None
 
@@ -496,6 +740,20 @@ class FailureResolverProcessor:
                     failure_id,
                     source.resolution_id,
                     commit_sha=result.commit_sha,
+                )
+            elif (
+                result.changed
+                and result.commit_sha is not None
+                and _is_ingested_memory_ack(
+                    linked_failure,
+                    source.resolution_id,
+                )
+            ):
+                await self._refresh_memory_ingested(
+                    failure_id,
+                    source.resolution_id,
+                    commit_sha=result.commit_sha,
+                    expected_commit_sha=_memory_ack_commit(linked_failure),
                 )
             return result
         except asyncio.CancelledError:
@@ -685,6 +943,44 @@ class FailureResolverProcessor:
             .execute()
         )
         self.state.memory_acks_failed += 1
+
+    async def _refresh_memory_ingested(
+        self,
+        failure_id: str | None,
+        resolution_id: str,
+        *,
+        commit_sha: str,
+        expected_commit_sha: str | None,
+    ) -> None:
+        """CAS-refresh provenance for an already-ingested changed memory."""
+
+        if failure_id is None:
+            return
+        client = self._required_client()
+        query = (
+            client.table(self.failure_events_table)
+            .update(
+                {
+                    "memory_status": "ingested",
+                    "memory_resolution_id": resolution_id,
+                    "memory_commit_sha": commit_sha,
+                    "memory_message": "Recovery memory ingested.",
+                    "memory_ingested_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            .eq(_FAILURE_ID, failure_id)
+            .eq("memory_status", "ingested")
+            .eq("memory_resolution_id", resolution_id)
+        )
+        query = (
+            query.eq("memory_commit_sha", expected_commit_sha)
+            if expected_commit_sha is not None
+            else query.is_("memory_commit_sha", "null")
+        )
+        response = await query.execute()
+        data = getattr(response, "data", None)
+        if isinstance(data, list) and data:
+            self.state.memory_acks_ingested += 1
 
     async def _finish_failure(
         self,
@@ -1047,6 +1343,23 @@ def _project_failure_context(failure: Mapping[str, Any]) -> dict[str, Any]:
 
     context = failure.get("sanitized_context")
     if isinstance(context, Mapping):
+        location = context.get("location")
+        if isinstance(location, Mapping):
+            for field_name in (
+                "site_id",
+                "site",
+                "floor",
+                "room_number",
+                "map_id",
+                "map_name",
+                "map_observed_at",
+            ):
+                value = location.get(field_name)
+                if (
+                    field_name not in projected
+                    and not _is_missing_context_value(value)
+                ):
+                    projected[field_name] = value
         flow = context.get("flow")
         if isinstance(flow, Mapping):
             for target, source in (
@@ -1078,6 +1391,40 @@ def _project_failure_context(failure: Mapping[str, Any]) -> dict[str, Any]:
 
 def _is_missing_context_value(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _is_ingested_memory_ack(
+    failure: Mapping[str, Any] | None,
+    resolution_id: str,
+) -> bool:
+    return bool(
+        failure is not None
+        and _normalized_text(failure.get("memory_status")) == "ingested"
+        and _safe_identifier(failure.get("memory_resolution_id"))
+        == resolution_id
+    )
+
+
+def _memory_ack_needs_commit_refresh(
+    failure: Mapping[str, Any] | None,
+    resolution_id: str,
+    commit_sha: str,
+) -> bool:
+    return bool(
+        _is_ingested_memory_ack(failure, resolution_id)
+        and _safe_identifier(failure.get("memory_commit_sha"))
+        != commit_sha
+    )
+
+
+def _memory_ack_commit(
+    failure: Mapping[str, Any] | None,
+) -> str | None:
+    return (
+        _safe_identifier(failure.get("memory_commit_sha"))
+        if failure is not None
+        else None
+    )
 
 
 def _successful_action_runs(
@@ -1135,40 +1482,6 @@ def _failure_with_location_context(
         context["location"] = location
     prepared["sanitized_context"] = context
     return prepared
-
-
-def _ranked_execution_candidates(
-    failure: Mapping[str, Any],
-    documents: Iterable[MemoryDocument],
-) -> tuple[MemoryDocument, ...]:
-    candidates = [
-        document
-        for document in documents
-        if _is_safe_execution_candidate(document)
-    ]
-    values = _failure_retrieval_values(failure)
-
-    def score(document: MemoryDocument) -> tuple[int, str]:
-        frontmatter = document.frontmatter
-        weights = {
-            "flow_id": 8,
-            "failed_command": 7,
-            "item_name": 6,
-            "flow_name": 5,
-            "area_name": 4,
-            "site": 3,
-            "room_number": 3,
-            "sysid": 2,
-        }
-        total = 0
-        for field_name, weight in weights.items():
-            expected = _normalized_text(values.get(field_name))
-            actual = _normalized_text(frontmatter.get(field_name))
-            if expected and actual and expected == actual:
-                total += weight
-        return (-total, document.resolution_id)
-
-    return tuple(sorted(candidates, key=score)[:_MAX_MATCH_CANDIDATES])
 
 
 def _is_safe_execution_candidate(document: MemoryDocument) -> bool:
@@ -1240,46 +1553,19 @@ def _suggestion_action(action: Mapping[str, Any]) -> Mapping[str, Any]:
     }
 
 
-def _memory_retrieval_text(document: MemoryDocument) -> str:
-    """Return descriptive memory text without executable action payloads."""
-    retrieval_fields = (
-        "site",
-        "room_number",
-        "flow_id",
-        "flow_name",
-        "area_name",
-        "item_name",
-        "failure_status",
-        "failed_command",
-        "captured_at",
-        "resolved_at",
+def _retrieval_no_solution(
+    documents: Iterable[MemoryDocument],
+    reason: str,
+) -> RetrievalOutcome:
+    return RetrievalOutcome(
+        choice=MemoryChoice(
+            decision="no_solution",
+            memory_id=None,
+            confidence=0.0,
+            reason=reason,
+        ),
+        documents=tuple(documents),
     )
-    metadata = {
-        field_name: document.frontmatter.get(field_name)
-        for field_name in retrieval_fields
-        if document.frontmatter.get(field_name) is not None
-    }
-    descriptive_body = document.body.rsplit(
-        "\n## Dispatched Actions\n",
-        1,
-    )[0].strip()
-    return "\n".join(
-        (
-            "# Recovery memory",
-            "",
-            "## Retrieval metadata",
-            "```json",
-            json.dumps(
-                metadata,
-                ensure_ascii=False,
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-            "```",
-            "",
-            descriptive_body,
-        )
-    ).strip()
 
 
 def _failure_retrieval_values(
@@ -1287,16 +1573,46 @@ def _failure_retrieval_values(
 ) -> dict[str, Any]:
     values = {
         "sysid": failure.get("sysid"),
+        "site_id": failure.get("site_id"),
+        "site": failure.get("site"),
+        "floor": failure.get("floor"),
+        "room_number": failure.get("room_number"),
+        "map_id": failure.get("map_id"),
+        "map_name": failure.get("map_name"),
         "flow_id": failure.get("flow_id"),
         "flow_name": failure.get("flow_name"),
-        "failed_command": failure.get("action_command"),
-        "site": failure.get("site"),
-        "room_number": failure.get("room_number"),
+        "activity_id": failure.get("activity_id"),
         "area_name": failure.get("area_name"),
         "item_name": failure.get("item_name"),
+        "failed_command": (
+            failure.get("failed_command")
+            or failure.get("action_command")
+        ),
     }
+    navigation = failure.get("navigation")
+    if isinstance(navigation, Mapping):
+        current_map = navigation.get("current_map")
+        if isinstance(current_map, Mapping):
+            values["map_id"] = values["map_id"] or current_map.get("id")
+            values["map_name"] = (
+                values["map_name"] or current_map.get("map_name")
+            )
+
     context = failure.get("sanitized_context")
     if isinstance(context, Mapping):
+        location = context.get("location")
+        if isinstance(location, Mapping):
+            for field_name in (
+                "site_id",
+                "site",
+                "floor",
+                "room_number",
+                "map_id",
+                "map_name",
+            ):
+                values[field_name] = (
+                    values[field_name] or location.get(field_name)
+                )
         flow = context.get("flow")
         if isinstance(flow, Mapping):
             values["site"] = values["site"] or flow.get("site")

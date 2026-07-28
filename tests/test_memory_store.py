@@ -193,6 +193,14 @@ def test_writes_prepared_memory_with_exact_source_actions(
 
     assert result.changed is True
     assert result.relative_path == f"memories/{RESOLUTION_1}.md"
+    assert store.latest_memory_commit(
+        RESOLUTION_1,
+        refresh=False,
+    ) == result.commit_sha
+    assert store.latest_memory_commit(
+        RESOLUTION_2,
+        refresh=False,
+    ) is None
     document = parse_memory_document(checkout / result.relative_path)
     assert document.source_hash == draft.source.source_hash
     assert document.frontmatter["memory_kind"] == "positive"
@@ -227,6 +235,47 @@ def test_writes_prepared_memory_with_exact_source_actions(
     )
     assert remote_content == (
         checkout / result.relative_path
+    ).read_text(encoding="utf-8").rstrip()
+
+
+def test_latest_memory_commit_recovers_an_interrupted_push(
+    memory_repository: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bare, checkout = memory_repository
+    store = store_for(bare, checkout)
+    draft = draft_for(resolution_row())
+
+    def fail_push() -> None:
+        raise GitOperationError("push")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_push", fail_push)
+        with pytest.raises(GitOperationError, match="push"):
+            store.write_memory(draft)
+
+    local_commit = git(["rev-parse", "HEAD"], cwd=checkout)
+    with pytest.raises(subprocess.CalledProcessError):
+        git(
+            [
+                "--git-dir",
+                str(bare),
+                "show",
+                f"main:memories/{RESOLUTION_1}.md",
+            ]
+        )
+
+    assert store.latest_memory_commit(RESOLUTION_1) == local_commit
+    remote_content = git(
+        [
+            "--git-dir",
+            str(bare),
+            "show",
+            f"main:memories/{RESOLUTION_1}.md",
+        ]
+    )
+    assert remote_content == (
+        checkout / "memories" / f"{RESOLUTION_1}.md"
     ).read_text(encoding="utf-8").rstrip()
 
 

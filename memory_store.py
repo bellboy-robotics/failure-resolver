@@ -32,6 +32,7 @@ _SCHEMA_VERSION = 1
 _SOURCE_TABLE = "public.flow_failure_resolutions"
 _MEMORIES_DIRECTORY = "memories"
 _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_GIT_COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40,64}$")
 _BRANCH_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _FRONTMATTER_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _ACTIONS_PATTERN = re.compile(
@@ -507,6 +508,56 @@ class GitMemoryStore:
             self.has_source_hash,
             resolution_id,
             source_hash,
+            refresh=refresh,
+        )
+
+    def latest_memory_commit(
+        self,
+        resolution_id: str,
+        *,
+        refresh: bool = True,
+    ) -> str | None:
+        """Return the latest remotely durable commit for one memory document."""
+
+        canonical_id = _canonical_uuid(resolution_id, "resolution_id")
+        relative_path = (
+            Path(_MEMORIES_DIRECTORY) / f"{canonical_id}.md"
+        ).as_posix()
+        with self._thread_lock, self._process_lock():
+            self._ensure_checkout()
+            if refresh:
+                self._pull_ff_only()
+            target = self.config.repo_root / relative_path
+            if target.is_symlink():
+                raise GitMemoryConfigurationError(
+                    "Memory path cannot be a symlink"
+                )
+            if not target.is_file():
+                return None
+            # A previous write can have committed locally and then failed while
+            # pushing. Source-hash reconciliation sees that local file, so
+            # recover the interrupted push before Supabase is allowed to
+            # acknowledge the memory as ingested.
+            self._push()
+            commit_sha = self._git(
+                ["log", "-1", "--format=%H", "--", relative_path],
+                operation="read memory commit",
+            )
+            if not commit_sha:
+                return None
+            if not _GIT_COMMIT_PATTERN.fullmatch(commit_sha):
+                raise MemoryFormatError("Memory Git commit is invalid")
+            return commit_sha
+
+    async def alatest_memory_commit(
+        self,
+        resolution_id: str,
+        *,
+        refresh: bool = True,
+    ) -> str | None:
+        return await asyncio.to_thread(
+            self.latest_memory_commit,
+            resolution_id,
             refresh=refresh,
         )
 

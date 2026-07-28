@@ -8,12 +8,15 @@ memory agent. It:
   startup, so Realtime is not the durable queue;
 - changes a pending failure to `matching`, then `solution_found`,
   `no_solution`, or `failed`;
-- asks OpenAI whether a Git-backed Markdown memory applies;
+- rebuilds a deterministic search index from Git-backed Markdown memory;
+- lets OpenAI search, read, refine, and select an exact memory ID within hard
+  retrieval budgets (small memory sets are read exhaustively);
 - generalizes successful operator-demonstrated resolutions into Markdown; and
 - commits and pushes those memories to the configured repository.
 
 The resolver does **not** dispatch physical robot commands. A selected memory's
 exact demonstrated actions remain data for the downstream recovery boundary.
+Search and model output cannot create or modify those actions.
 
 ## Run locally
 
@@ -64,8 +67,8 @@ state in `failure_events`.
 
 ```bash
 python -m pip install -r requirements-observer-dev.txt
-python -m pytest -q tests/test_agent.py tests/test_memory_store.py \
-  tests/test_observer.py tests/test_resolver.py
+python -m pytest -q tests/test_retrieval.py tests/test_agent.py \
+  tests/test_memory_store.py tests/test_observer.py tests/test_resolver.py
 docker compose config
 docker build -t failure-resolver:local .
 ```

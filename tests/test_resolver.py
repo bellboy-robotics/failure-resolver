@@ -15,6 +15,11 @@ from agent import (
     GeneralizationResult,
     MemoryChoice,
     MemoryChoiceResult,
+    MemoryFinishAction,
+    MemoryReadAction,
+    MemoryRetrievalTurn,
+    MemoryRetrievalTurnResult,
+    MemorySearchAction,
     ResolutionGeneralization,
 )
 from memory_store import MemoryDocument, MemoryWriteResult
@@ -22,6 +27,7 @@ from resolver import (
     FailureResolverProcessor,
     ResolverSettings,
     SupabaseAgentRuntime,
+    _failure_retrieval_values,
 )
 
 
@@ -50,6 +56,12 @@ class FakeQuery:
 
     def eq(self, column: str, value: Any) -> "FakeQuery":
         self.filters.append((column, value))
+        return self
+
+    def is_(self, column: str, value: Any) -> "FakeQuery":
+        self.filters.append(
+            (column, None if value == "null" else value)
+        )
         return self
 
     def limit(self, value: int) -> "FakeQuery":
@@ -169,13 +181,18 @@ class FakeAgent:
         self,
         *,
         choice: MemoryChoice | None = None,
+        retrieval_turns: list[MemoryRetrievalTurn] | None = None,
         generalization: ResolutionGeneralization | None = None,
         generalization_error: Exception | None = None,
     ) -> None:
         self.choice = choice
+        self.retrieval_turns = list(retrieval_turns or [])
         self.generalization = generalization
         self.generalization_error = generalization_error
         self.choice_calls: list[tuple[Mapping[str, Any], Any]] = []
+        self.retrieval_calls: list[
+            tuple[Mapping[str, Any], list[Mapping[str, Any]]]
+        ] = []
         self.generalization_calls: list[Mapping[str, Any]] = []
         self.close_calls = 0
 
@@ -187,6 +204,24 @@ class FakeAgent:
             choice=self.choice,
             model="test-model",
             response_id="resp-choice",
+            input_tokens=10,
+            output_tokens=5,
+        )
+
+    async def next_memory_retrieval_turn(
+        self,
+        failure,
+        observations,
+    ) -> MemoryRetrievalTurnResult:
+        self.retrieval_calls.append(
+            (copy.deepcopy(failure), copy.deepcopy(list(observations)))
+        )
+        if not self.retrieval_turns:
+            raise AssertionError("retrieval turn was not expected")
+        return MemoryRetrievalTurnResult(
+            turn=self.retrieval_turns.pop(0),
+            model="test-model",
+            response_id="resp-retrieval",
             input_tokens=10,
             output_tokens=5,
         )
@@ -221,11 +256,14 @@ class FakeMemoryStore:
         *,
         index: Mapping[str, MemoryDocument] | None = None,
         has_source_hash: bool = False,
+        latest_commit: str | None = "f" * 40,
     ) -> None:
         self.index = dict(index or {})
         self.has_source_hash_result = has_source_hash
+        self.latest_commit_result = latest_commit
         self.index_calls = 0
         self.hash_calls: list[tuple[str, str, bool]] = []
+        self.latest_commit_calls: list[tuple[str, bool]] = []
         self.writes = []
 
     async def arebuild_index(self, *, refresh: bool = True):
@@ -241,6 +279,15 @@ class FakeMemoryStore:
     ) -> bool:
         self.hash_calls.append((resolution_id, source_hash, refresh))
         return self.has_source_hash_result
+
+    async def alatest_memory_commit(
+        self,
+        resolution_id: str,
+        *,
+        refresh: bool = True,
+    ) -> str | None:
+        self.latest_commit_calls.append((resolution_id, refresh))
+        return self.latest_commit_result
 
     async def awrite_memory(self, draft):
         self.writes.append(draft)
@@ -284,6 +331,54 @@ def failure_row() -> dict[str, Any]:
             "action": {"area_name": "Closet", "item_name": "Drawer"},
         },
         "created_at": "2026-07-28T18:00:00Z",
+    }
+
+
+def test_retrieval_hints_include_flow_site_room_and_map_context() -> None:
+    failure = failure_row()
+    failure.update(
+        {
+            "site_id": None,
+            "site": None,
+            "floor": None,
+            "room_number": None,
+            "map_id": None,
+            "map_name": None,
+            "navigation": {
+                "current_map": {
+                    "id": 92,
+                    "map_name": "hotel-floor-nine",
+                }
+            },
+            "sanitized_context": {
+                "location": {
+                    "site_id": 12,
+                    "site": "Test Hotel",
+                    "floor": "9",
+                    "room_number": "914",
+                },
+                "action": {
+                    "area_name": "Entry",
+                    "item_name": "Door",
+                },
+            },
+        }
+    )
+
+    assert _failure_retrieval_values(failure) == {
+        "sysid": "BILLIE-16",
+        "site_id": 12,
+        "site": "Test Hotel",
+        "floor": "9",
+        "room_number": "914",
+        "map_id": 92,
+        "map_name": "hotel-floor-nine",
+        "flow_id": "flow-room-101",
+        "flow_name": "Open room drawer",
+        "activity_id": None,
+        "area_name": "Entry",
+        "item_name": "Door",
+        "failed_command": "open_drawer",
     }
 
 
@@ -357,12 +452,14 @@ def memory_document(
     tmp_path: Path,
     *,
     actions: tuple[Mapping[str, Any], ...],
+    resolution_id: str = RESOLUTION_ID,
+    failure_text: str = "The drawer was already open.",
 ) -> MemoryDocument:
-    path = tmp_path / f"{RESOLUTION_ID}.md"
+    path = tmp_path / f"{resolution_id}.md"
     body = (
         "# Drawer memory\n\n"
         "## Failure Pattern\n"
-        "> The drawer was already open.\n\n"
+        f"> {failure_text}\n\n"
         "## Recovery Knowledge\n"
         "> Confirm the drawer state, then retry the interrupted step.\n\n"
         "## Dispatched Actions\n"
@@ -374,7 +471,7 @@ def memory_document(
     return MemoryDocument(
         path=path,
         frontmatter={
-            "resolution_id": RESOLUTION_ID,
+            "resolution_id": resolution_id,
             "source_hash": "a" * 64,
             "memory_kind": "positive",
             "actionable": True,
@@ -572,6 +669,113 @@ async def test_match_selects_one_existing_id_and_returns_exact_stored_actions(
         source_actions[0]["retry_context"]["retried_action"]["command"]
         == "open_drawer"
     )
+
+
+@pytest.mark.anyio
+async def test_agentic_retrieval_searches_reads_and_selects_exact_stored_action(
+    tmp_path: Path,
+) -> None:
+    memory_ids = [
+        f"00000000-0000-4000-8000-{index:012d}"
+        for index in range(1, 6)
+    ]
+    target_id = memory_ids[-1]
+    documents = {
+        memory_id: memory_document(
+            tmp_path,
+            resolution_id=memory_id,
+            failure_text=(
+                "The back-room door action was interrupted by a user abort."
+                if memory_id == target_id
+                else f"Unrelated recovery pattern {memory_id}."
+            ),
+            actions=(
+                {
+                    "command": (
+                        "fold" if memory_id == target_id else "bump"
+                    ),
+                    "title": (
+                        "Fold" if memory_id == target_id else "Bump"
+                    ),
+                    "arguments": {"speed": 60},
+                    "status": "sent",
+                },
+            ),
+        )
+        for memory_id in memory_ids
+    }
+    agent = FakeAgent(
+        retrieval_turns=[
+            MemoryRetrievalTurn(
+                step=MemoryFinishAction(
+                    action="finish",
+                    choice=MemoryChoice(
+                        decision="no_solution",
+                        memory_id=None,
+                        confidence=0,
+                        reason="Attempted to stop without retrieval.",
+                    ),
+                )
+            ),
+            MemoryRetrievalTurn(
+                step=MemorySearchAction(
+                    action="search",
+                    query="back room door interrupted user abort",
+                )
+            ),
+            MemoryRetrievalTurn(
+                step=MemoryReadAction(
+                    action="read",
+                    memory_ids=[target_id],
+                )
+            ),
+            MemoryRetrievalTurn(
+                step=MemoryFinishAction(
+                    action="finish",
+                    choice=MemoryChoice(
+                        decision="apply_memory",
+                        memory_id=target_id,
+                        confidence=0.93,
+                        reason="The task, failed step, and abort evidence match.",
+                    ),
+                )
+            ),
+        ]
+    )
+    client = FakeClient({"failure_events": [failure_row()]})
+    service = processor(
+        client,
+        agent,
+        FakeMemoryStore(index=documents),
+    )
+
+    match = await service.process_failure(FAILURE_ID)
+
+    assert match is not None
+    assert match.memory_id == target_id
+    assert match.actions == (
+        {
+            "command": "fold",
+            "title": "Fold",
+            "arguments": {"speed": 60},
+        },
+    )
+    assert agent.choice_calls == []
+    assert len(agent.retrieval_calls) == 4
+    assert any(
+        observation.get("kind") == "retrieval_correction"
+        for observation in agent.retrieval_calls[1][1]
+    )
+    read_observations = agent.retrieval_calls[-1][1]
+    read_markdown = next(
+        observation["documents"][0]["markdown"]
+        for observation in read_observations
+        if observation.get("kind") == "read_results"
+        and observation.get("documents")
+    )
+    assert "back-room door action" in read_markdown
+    assert "## Dispatched Actions" not in read_markdown
+    assert "must-not-enter-model-prompt" not in read_markdown
 
 
 @pytest.mark.anyio
@@ -800,6 +1004,14 @@ async def test_linked_failure_episode_is_merged_and_retained_for_memory() -> Non
         }
     )
     failure = failure_row()
+    failure["sanitized_context"]["location"] = {
+        "site_id": 0,
+        "site": "Office",
+        "floor": "ground",
+        "room_number": "101",
+        "map_id": 39,
+        "map_name": "BILLIE-17-OFFICE",
+    }
     failure.update(
         {
             "flow_id": "flow-open-door",
@@ -852,6 +1064,7 @@ async def test_linked_failure_episode_is_merged_and_retained_for_memory() -> Non
     assert model_row["failed_command"] == "replay_policy"
     assert model_row["failed_action"] == "Open door in back room"
     assert model_row["failed_step"] == "Open door in back room"
+    assert model_row["floor"] == "ground"
     assert [run["command"] for run in model_row["action_runs"]] == ["fold"]
 
     evidence = model_row["episode_evidence"]
@@ -914,13 +1127,14 @@ async def test_ingested_resolution_is_rebuilt_when_source_hash_changed() -> None
         }
     )
     store = FakeMemoryStore(has_source_hash=False)
+    client = FakeClient(
+        {
+            "failure_events": [linked_failure],
+            "flow_failure_resolutions": [resolution_row()],
+        }
+    )
     service = processor(
-        FakeClient(
-            {
-                "failure_events": [linked_failure],
-                "flow_failure_resolutions": [resolution_row()],
-            }
-        ),
+        client,
         FakeAgent(generalization=generalization()),
         store,
     )
@@ -932,6 +1146,93 @@ async def test_ingested_resolution_is_rebuilt_when_source_hash_changed() -> None
     assert store.writes[0].source.payload["episode_evidence"][
         "failure_event"
     ]["flow_name"] == "Open room drawer"
+    assert [update[1]["memory_status"] for update in client.updates] == [
+        "ingested"
+    ]
+    row = client.tables["failure_events"][0]
+    assert row["memory_status"] == "ingested"
+    assert row["memory_commit_sha"] == "abc123"
+    assert row["memory_message"] == "Recovery memory ingested."
+    assert datetime.fromisoformat(row["memory_ingested_at"])
+    assert client.updates[0][2] == [
+        ("failure_id", FAILURE_ID),
+        ("memory_status", "ingested"),
+        ("memory_resolution_id", RESOLUTION_ID),
+        ("memory_commit_sha", "old-commit"),
+    ]
+
+
+@pytest.mark.anyio
+async def test_unchanged_ingested_memory_refreshes_stale_commit_ack() -> None:
+    linked_failure = failure_row()
+    linked_failure.update(
+        {
+            "memory_status": "ingested",
+            "memory_resolution_id": RESOLUTION_ID,
+            "memory_commit_sha": "existing-commit",
+            "memory_message": "Recovery memory ingested.",
+            "memory_ingested_at": "2026-07-28T18:10:00+00:00",
+        }
+    )
+    client = FakeClient(
+        {
+            "failure_events": [linked_failure],
+            "flow_failure_resolutions": [resolution_row()],
+        }
+    )
+    service = processor(
+        client,
+        FakeAgent(generalization=generalization()),
+        FakeMemoryStore(has_source_hash=True),
+    )
+
+    result = await service.learn_resolution(RESOLUTION_ID)
+
+    assert result is None
+    assert [update[1]["memory_status"] for update in client.updates] == [
+        "ingested"
+    ]
+    row = client.tables["failure_events"][0]
+    assert row["memory_status"] == "ingested"
+    assert row["memory_commit_sha"] == "f" * 40
+    assert datetime.fromisoformat(row["memory_ingested_at"])
+
+
+@pytest.mark.anyio
+async def test_unchanged_ingested_memory_preserves_current_commit_ack() -> None:
+    current_commit = "e" * 40
+    linked_failure = failure_row()
+    linked_failure.update(
+        {
+            "memory_status": "ingested",
+            "memory_resolution_id": RESOLUTION_ID,
+            "memory_commit_sha": current_commit,
+            "memory_message": "Recovery memory ingested.",
+            "memory_ingested_at": "2026-07-28T18:10:00+00:00",
+        }
+    )
+    client = FakeClient(
+        {
+            "failure_events": [linked_failure],
+            "flow_failure_resolutions": [resolution_row()],
+        }
+    )
+    service = processor(
+        client,
+        FakeAgent(generalization=generalization()),
+        FakeMemoryStore(
+            has_source_hash=True,
+            latest_commit=current_commit,
+        ),
+    )
+
+    result = await service.learn_resolution(RESOLUTION_ID)
+
+    assert result is None
+    assert client.updates == []
+    row = client.tables["failure_events"][0]
+    assert row["memory_commit_sha"] == current_commit
+    assert row["memory_ingested_at"] == "2026-07-28T18:10:00+00:00"
 
 
 @pytest.mark.anyio
@@ -1166,7 +1467,7 @@ async def test_existing_source_hash_skips_model_and_git_write() -> None:
     assert service.state.resolutions_skipped == 1
     row = client.tables["failure_events"][0]
     assert row["memory_status"] == "ingested"
-    assert row["memory_commit_sha"] is None
+    assert row["memory_commit_sha"] == "f" * 40
     assert row["memory_message"] == "Recovery memory ingested."
 
 
