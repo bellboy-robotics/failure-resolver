@@ -30,6 +30,7 @@ RUN pip install --no-cache-dir -r requirements-observer.txt
 
 COPY --chown=resolver:resolver \
     agent.py \
+    episode_evidence.py \
     memory_store.py \
     observer.py \
     resolver.py \

@@ -755,12 +755,183 @@ async def test_resolved_applied_episode_writes_positive_markdown_draft() -> None
         "$rerun"
     ]
     assert draft.failure_summary.startswith("The drawer-opening")
+    assert draft.signature == {
+        "task_family": "open drawer",
+        "failed_step": "open drawer",
+        "failure_mode": "already open",
+        "object_state": "open",
+        "context": ["closet"],
+    }
     assert draft.lessons == (
         "Retrieval tag: drawer",
         "Retrieval tag: already-open",
     )
     assert service.state.memories_written == 1
     assert service.state.last_memory_commit == "abc123"
+
+
+@pytest.mark.anyio
+async def test_linked_failure_episode_is_merged_and_retained_for_memory() -> None:
+    resolution = resolution_row()
+    resolution.update(
+        {
+            "site": "Resolution-owned site",
+            "flow_id": None,
+            "flow_name": None,
+            "failure_status": None,
+            "failure_reason": None,
+            "failed_command": None,
+            "failed_action": None,
+            "action_runs": [
+                {
+                    "command": "fold",
+                    "title": "Fold",
+                    "arguments": {"speed": 60},
+                    "status": "sent",
+                    "state_before": {"arm": {"joints": [1, 2, 3]}},
+                },
+                {
+                    "command": "bump",
+                    "title": "Bump",
+                    "arguments": {},
+                    "status": "failed",
+                },
+            ],
+        }
+    )
+    failure = failure_row()
+    failure.update(
+        {
+            "flow_id": "flow-open-door",
+            "flow_name": "Open Door For Testing",
+            "flow_status": "paused",
+            "action_command": "replay_policy",
+            "description": "The door-opening action was user-aborted.",
+            "failed_step": "Open door in back room",
+            "robot_errors": [
+                {
+                    "reported_at": "2026-07-28T19:27:53Z",
+                    "message": "Action interrupted.",
+                }
+            ],
+            "flow_snapshot": {
+                "steps": [
+                    {"title": "Travel to back room", "status": "completed"},
+                    {"title": "Open door in back room", "status": "paused"},
+                ]
+            },
+            "operator_email": "must-not-enter-memory@example.com",
+            "input_tokens": 321,
+            "matcher_message": "mutable resolver bookkeeping",
+            "transport": {
+                "access_token": "must-not-enter-memory",
+                "connected": True,
+            },
+        }
+    )
+    client = FakeClient(
+        {
+            "failure_events": [failure],
+            "flow_failure_resolutions": [resolution],
+        }
+    )
+    agent = FakeAgent(generalization=generalization())
+    store = FakeMemoryStore()
+    service = processor(client, agent, store)
+
+    await service.learn_resolution(RESOLUTION_ID)
+
+    model_row = agent.generalization_calls[0]
+    assert model_row["site"] == "Resolution-owned site"
+    assert model_row["flow_id"] == "flow-open-door"
+    assert model_row["flow_name"] == "Open Door For Testing"
+    assert model_row["failure_status"] == "paused"
+    assert model_row["failure_reason"] == (
+        "The door-opening action was user-aborted."
+    )
+    assert model_row["failed_command"] == "replay_policy"
+    assert model_row["failed_action"] == "Open door in back room"
+    assert model_row["failed_step"] == "Open door in back room"
+    assert [run["command"] for run in model_row["action_runs"]] == ["fold"]
+
+    evidence = model_row["episode_evidence"]
+    assert evidence["failure_event"]["robot_errors"][0]["message"] == (
+        "Action interrupted."
+    )
+    assert evidence["failure_event"]["flow_snapshot"]["steps"][1]["title"] == (
+        "Open door in back room"
+    )
+    assert "operator_email" not in evidence["failure_event"]
+    assert evidence["failure_event"]["input_tokens"] == 321
+    assert "matcher_message" not in evidence["failure_event"]
+    assert evidence["failure_event"]["transport"] == {"connected": True}
+    assert len(evidence["resolution_event"]["action_runs"]) == 2
+    assert evidence["resolution_event"]["outcome"] == "resolved"
+    assert evidence["resolution_event"]["applied"] is True
+
+    source_payload = store.writes[0].source.payload
+    assert source_payload["episode_evidence"] == evidence
+    assert source_payload["flow_name"] == "Open Door For Testing"
+    assert source_payload["failed_step"] == "Open door in back room"
+    assert [run["command"] for run in store.writes[0].source.dispatched_actions] == [
+        "fold"
+    ]
+
+
+@pytest.mark.anyio
+async def test_linked_failure_change_invalidates_resolution_source_hash() -> None:
+    hashes: list[str] = []
+    for description in ("Door was blocked.", "Door was already open."):
+        failure = failure_row()
+        failure["description"] = description
+        resolution = resolution_row()
+        resolution["failure_reason"] = None
+        store = FakeMemoryStore()
+        service = processor(
+            FakeClient(
+                {
+                    "failure_events": [failure],
+                    "flow_failure_resolutions": [resolution],
+                }
+            ),
+            FakeAgent(generalization=generalization()),
+            store,
+        )
+        await service.learn_resolution(RESOLUTION_ID)
+        hashes.append(store.writes[0].source.source_hash)
+
+    assert hashes[0] != hashes[1]
+
+
+@pytest.mark.anyio
+async def test_ingested_resolution_is_rebuilt_when_source_hash_changed() -> None:
+    linked_failure = failure_row()
+    linked_failure.update(
+        {
+            "memory_status": "ingested",
+            "memory_resolution_id": RESOLUTION_ID,
+            "memory_commit_sha": "old-commit",
+        }
+    )
+    store = FakeMemoryStore(has_source_hash=False)
+    service = processor(
+        FakeClient(
+            {
+                "failure_events": [linked_failure],
+                "flow_failure_resolutions": [resolution_row()],
+            }
+        ),
+        FakeAgent(generalization=generalization()),
+        store,
+    )
+
+    result = await service.learn_resolution(RESOLUTION_ID)
+
+    assert result is not None
+    assert len(store.writes) == 1
+    assert store.writes[0].source.payload["episode_evidence"][
+        "failure_event"
+    ]["flow_name"] == "Open room drawer"
 
 
 @pytest.mark.anyio

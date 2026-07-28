@@ -22,14 +22,18 @@ from pydantic import (
     model_validator,
 )
 
+from episode_evidence import (
+    sanitize_episode_value,
+    validate_episode_evidence,
+)
 
 _MAX_INPUT_TEXT_LENGTH = 2_000
 _MAX_CONTEXT_JSON_LENGTH = 12_000
 _MAX_MEMORY_ID_LENGTH = 200
-_MAX_MEMORY_MARKDOWN_LENGTH = 4_000
+_MAX_MEMORY_MARKDOWN_LENGTH = 192_000
 _MAX_MEMORY_CANDIDATES = 50
-_MAX_GENERALIZATION_INPUT_LENGTH = 32_000
-_MAX_MEMORY_INPUT_LENGTH = 64_000
+_MAX_GENERALIZATION_INPUT_LENGTH = 256_000
+_MAX_MEMORY_INPUT_LENGTH = 512_000
 
 _GENERALIZE_INSTRUCTIONS = """
 You generalize a successful, operator-demonstrated robot recovery into a
@@ -42,9 +46,13 @@ object state, task step, or outcome.
 
 Return a short generalized failure pattern, a conceptual resolution summary,
 retrieval tags, and a bounded signature. Do not output executable commands,
-action names, parameters, code, or a new recovery plan. Exact demonstrated
-actions are retained separately by application code and are not part of your
-output. If a cause or field is not established, use null rather than guessing.
+parameters, code, or a new recovery plan. Describe the recovery that was
+actually applied, including its recorded action name when established, as
+historical evidence only. Exact demonstrated actions are retained separately
+by application code and are not part of your output. Treat outcome=resolved,
+applied=true, and successful action-run evidence as proof of the recorded
+recovery outcome. If a cause or field is not established, use null rather than
+guessing.
 Do not expose credentials, URLs, personal data, document text, or incidental
 room-card text.
 """.strip()
@@ -399,11 +407,19 @@ def _resolution_model_context(
             "robot_message",
             "auto_failure_reason",
             "resolution",
+            "outcome",
+            "applied",
+            "description",
+            "failed_step",
         ),
     )
     context["failed_action"] = _bounded_json_data(
         resolution.get("failed_action")
     )
+    # Keep these typed: they are explicit evidence that the demonstrated
+    # recovery completed, not prose for the model to infer.
+    context["outcome"] = resolution.get("outcome")
+    context["applied"] = resolution.get("applied")
     context["demonstrated_action_metadata"] = [
         {
             "command": _bounded_text(action.get("command"), max_length=160),
@@ -415,6 +431,15 @@ def _resolution_model_context(
         }
         for action in demonstrated_actions
     ]
+    context["successful_action_run_evidence"] = sanitize_episode_value(
+        list(demonstrated_actions)
+    )
+    evidence = resolution.get("episode_evidence")
+    context["episode_evidence"] = (
+        validate_episode_evidence(evidence)
+        if evidence is not None
+        else None
+    )
     return context
 
 
@@ -528,14 +553,12 @@ def _prepare_memories(
             raise TypeError("memory markdown must be text")
 
         seen_ids.add(memory_id)
+        if len(memory.markdown) > _MAX_MEMORY_MARKDOWN_LENGTH:
+            raise ValueError("memory markdown exceeds the bounded limit")
         prepared.append(
             {
                 "memory_id": memory_id,
-                "markdown": _bounded_text(
-                    memory.markdown,
-                    max_length=_MAX_MEMORY_MARKDOWN_LENGTH,
-                )
-                or "",
+                "markdown": memory.markdown,
             }
         )
     return prepared

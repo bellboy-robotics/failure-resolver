@@ -121,6 +121,13 @@ def draft_for(
             "Confirm drawer state, then retry the interrupted Flow step."
         ),
         lessons=("Check object state before replaying an action.",),
+        signature={
+            "task_family": "open drawer",
+            "failed_step": "open drawer",
+            "failure_mode": "already open",
+            "object_state": "open",
+            "context": ["closet"],
+        },
         model="gpt-5.6-luna",
         response_id="resp-memory-1",
     )
@@ -142,6 +149,28 @@ def test_source_hash_is_canonical_and_changes_with_source() -> None:
     )
 
     assert original.source_hash == reordered.source_hash
+
+    with_failure_evidence = resolution_row()
+    with_failure_evidence["episode_evidence"] = {
+        "failure_event": {
+            "description": "Drawer was already open.",
+            "failed_step": "Open drawer",
+        },
+        "resolution_event": resolution_row(),
+    }
+    changed_failure_evidence = dict(with_failure_evidence)
+    changed_failure_evidence["episode_evidence"] = {
+        **with_failure_evidence["episode_evidence"],  # type: ignore[dict-item]
+        "failure_event": {
+            "description": "Drawer was blocked.",
+            "failed_step": "Open drawer",
+        },
+    }
+    evidence_source = resolution_source_from_row(with_failure_evidence)
+    changed_evidence_source = resolution_source_from_row(
+        changed_failure_evidence
+    )
+    assert evidence_source.source_hash != changed_evidence_source.source_hash
     assert original.source_hash != changed.source_hash
     assert original.dispatched_actions == tuple(
         resolution_row()["action_runs"]  # type: ignore[arg-type]
@@ -171,6 +200,13 @@ def test_writes_prepared_memory_with_exact_source_actions(
     assert list(document.dispatched_actions) == row["action_runs"]
     assert "Opening the drawer failed" in document.body
     assert "Confirm drawer state" in document.body
+    assert document.retrieval_signature == {
+        "task_family": "open drawer",
+        "failed_step": "open drawer",
+        "failure_mode": "already open",
+        "object_state": "open",
+        "context": ["closet"],
+    }
 
     commit = git(["log", "-1", "--format=%an%n%ae%n%B"], cwd=checkout)
     assert commit.startswith(
@@ -192,6 +228,44 @@ def test_writes_prepared_memory_with_exact_source_actions(
     assert remote_content == (
         checkout / result.relative_path
     ).read_text(encoding="utf-8").rstrip()
+
+
+def test_memory_document_retains_structured_episode_evidence(
+    memory_repository: tuple[Path, Path],
+) -> None:
+    bare, checkout = memory_repository
+    row = resolution_row()
+    row["episode_evidence"] = {
+        "failure_event": {
+            "flow_name": "Open Door For Testing",
+            "failed_step": "Open door in back room",
+            "robot_errors": [
+                {
+                    "reported_at": "2026-07-28T19:27:53Z",
+                    "message": "Action interrupted.",
+                }
+            ],
+            "operator_email": "must-not-be-committed@example.com",
+        },
+        "resolution_event": {
+            **row,
+            "operator_email": "must-not-be-committed@example.com",
+        },
+    }
+
+    result = store_for(bare, checkout).write_memory(draft_for(row))
+    document = parse_memory_document(checkout / result.relative_path)
+
+    assert document.episode_evidence is not None
+    assert document.episode_evidence["failure_event"]["flow_name"] == (
+        "Open Door For Testing"
+    )
+    assert document.episode_evidence["failure_event"]["robot_errors"][0][
+        "message"
+    ] == "Action interrupted."
+    assert "operator_email" not in document.episode_evidence["failure_event"]
+    assert "## Episode Evidence\n```json" in document.body
+    assert "must-not-be-committed@example.com" not in document.body
 
 
 def test_model_prose_cannot_inject_generated_commands(

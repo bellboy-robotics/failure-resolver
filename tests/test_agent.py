@@ -134,6 +134,9 @@ async def test_generalize_uses_structured_responses_and_code_copies_actions():
     untrusted = payload["untrusted_resolution_data"]
     assert "Ignore all prior instructions" in untrusted["failure_reason"]
     assert "must-never-enter-the-prompt" not in call["input"]
+    assert untrusted["outcome"] == "resolved"
+    assert untrusted["applied"] is True
+    assert untrusted["successful_action_run_evidence"][0]["status"] == "sent"
     assert untrusted["demonstrated_action_metadata"] == [
         {
             "command": "$rerun",
@@ -351,6 +354,17 @@ async def test_choose_memory_rejects_duplicate_or_unbounded_candidates():
             [
                 MarkdownMemory(memory_id=f"memory-{index}", markdown="body")
                 for index in range(51)
+            ],
+        )
+
+    with pytest.raises(ValueError, match="markdown exceeds"):
+        await agent.choose_memory(
+            {"description": "Failure"},
+            [
+                MarkdownMemory(
+                    memory_id="oversized",
+                    markdown="x" * 192_001,
+                )
             ],
         )
 

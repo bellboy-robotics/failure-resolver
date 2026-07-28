@@ -33,6 +33,7 @@ from agent import (
     MemoryChoiceResult,
     OpenAIFailureAgent,
 )
+from episode_evidence import build_episode_evidence
 from memory_store import (
     GitMemoryConfig,
     GitMemoryStore,
@@ -433,16 +434,30 @@ class FailureResolverProcessor:
             return None
 
         failure_id = _safe_identifier(row.get(_FAILURE_ID))
+        linked_failure = (
+            await self._fetch_row(
+                self.failure_events_table,
+                _FAILURE_ID,
+                failure_id,
+            )
+            if failure_id is not None
+            else None
+        )
         acknowledgement = await self._claim_memory_ingestion(
             failure_id,
             resolution_id,
+            current_failure=linked_failure,
         )
         if acknowledgement == "owned_elsewhere":
             self.state.resolutions_skipped += 1
             return None
 
         try:
-            memory_row = _row_with_successful_actions(row)
+            episode_row = _resolution_with_failure_context(
+                row,
+                linked_failure,
+            )
+            memory_row = _row_with_successful_actions(episode_row)
             source = resolution_source_from_row(memory_row)
             if await self.memory_store.ahas_source_hash(
                 source.resolution_id,
@@ -558,13 +573,19 @@ class FailureResolverProcessor:
         self,
         failure_id: str | None,
         resolution_id: str,
+        *,
+        current_failure: Mapping[str, Any] | None = None,
     ) -> Literal["claimed", "owned_elsewhere", "untracked"]:
         if failure_id is None:
             return "untracked"
-        current = await self._fetch_row(
-            self.failure_events_table,
-            _FAILURE_ID,
-            failure_id,
+        current = (
+            dict(current_failure)
+            if current_failure is not None
+            else await self._fetch_row(
+                self.failure_events_table,
+                _FAILURE_ID,
+                failure_id,
+            )
         )
         if current is None:
             return "untracked"
@@ -579,9 +600,13 @@ class FailureResolverProcessor:
         ):
             if (
                 current_resolution == resolution_id
-                and current_status in {"ingesting", "ingested"}
+                and current_status == "ingesting"
             ):
                 return "owned_elsewhere"
+            # An already-ingested resolution must still pass through source
+            # hashing. Linked episode evidence can arrive or improve after the
+            # first memory write; Git will make an unchanged source a no-op and
+            # rewrite the same resolution document when its evidence changed.
             return "untracked"
 
         client = self._required_client()
@@ -925,6 +950,7 @@ def _memory_draft(
         failure_summary=generalization.failure_pattern,
         recovery_summary=generalization.resolution_summary,
         lessons=lessons,
+        signature=generalization.signature.model_dump(mode="json"),
         model=result.model,
         response_id=result.response_id,
     )
@@ -942,6 +968,116 @@ def _row_with_successful_actions(row: Mapping[str, Any]) -> dict[str, Any]:
     normalized = dict(row)
     normalized["action_runs"] = _successful_action_runs(row)
     return normalized
+
+
+def _resolution_with_failure_context(
+    resolution: Mapping[str, Any],
+    failure: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Join one resolution to its immutable failure episode evidence.
+
+    Resolution values and action records remain authoritative.  Failure values
+    only fill absent retrieval/generalization fields; both original rows are
+    retained separately as bounded, credential-free episode evidence.
+    """
+
+    prepared = copy.deepcopy(dict(resolution))
+    if failure is not None:
+        failure_context = _project_failure_context(failure)
+        for field_name, value in failure_context.items():
+            if _is_missing_context_value(prepared.get(field_name)):
+                prepared[field_name] = copy.deepcopy(value)
+    prepared["episode_evidence"] = build_episode_evidence(
+        failure_event=failure,
+        resolution_event=resolution,
+    )
+    return prepared
+
+
+def _project_failure_context(failure: Mapping[str, Any]) -> dict[str, Any]:
+    projected: dict[str, Any] = {}
+    direct_fields = (
+        "sysid",
+        "site_id",
+        "site",
+        "floor",
+        "room_number",
+        "map_id",
+        "map_name",
+        "map_observed_at",
+        "flow_id",
+        "flow_name",
+        "activity_id",
+        "area_name",
+        "item_name",
+        "robot_version",
+        "robot_status",
+        "navigation",
+        "arm_state",
+        "mapping_pose",
+        "status_reported_at",
+        "flow_snapshot",
+        "run_code",
+    )
+    for field_name in direct_fields:
+        if not _is_missing_context_value(failure.get(field_name)):
+            projected[field_name] = failure.get(field_name)
+
+    aliases = {
+        "failure_status": ("failure_status", "flow_status", "action_status"),
+        "failure_reason": (
+            "failure_reason",
+            "description",
+            "reported_cause",
+            "reported_error",
+        ),
+        "failed_command": ("failed_command", "action_command"),
+        "failed_action": ("failed_action", "failed_step"),
+        "description": ("description", "failure_reason"),
+        "failed_step": ("failed_step",),
+        "robot_message": ("robot_message", "reported_error"),
+        "auto_failure_reason": ("auto_failure_reason", "reported_cause"),
+    }
+    for target, candidates in aliases.items():
+        for candidate in candidates:
+            value = failure.get(candidate)
+            if not _is_missing_context_value(value):
+                projected[target] = value
+                break
+
+    context = failure.get("sanitized_context")
+    if isinstance(context, Mapping):
+        flow = context.get("flow")
+        if isinstance(flow, Mapping):
+            for target, source in (
+                ("site", "site"),
+                ("room_number", "room"),
+            ):
+                value = flow.get(source)
+                if (
+                    target not in projected
+                    and not _is_missing_context_value(value)
+                ):
+                    projected[target] = value
+        action = context.get("action")
+        if isinstance(action, Mapping):
+            for field_name in ("area_name", "item_name"):
+                value = action.get(field_name)
+                if (
+                    field_name not in projected
+                    and not _is_missing_context_value(value)
+                ):
+                    projected[field_name] = value
+        if "navigation" not in projected and isinstance(
+            context.get("navigation"),
+            Mapping,
+        ):
+            projected["navigation"] = context["navigation"]
+    return projected
+
+
+def _is_missing_context_value(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
 
 
 def _successful_action_runs(

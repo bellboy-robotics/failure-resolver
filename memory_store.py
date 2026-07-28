@@ -24,6 +24,7 @@ from typing import Any, Iterator, Literal, Mapping, Sequence
 from urllib.parse import urlsplit
 from uuid import UUID
 
+from episode_evidence import validate_episode_evidence
 
 MemoryKind = Literal["positive", "negative"]
 
@@ -36,6 +37,16 @@ _FRONTMATTER_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 _ACTIONS_PATTERN = re.compile(
     r"(?:^|\n)## Dispatched Actions\n```json\n"
     r"(?P<actions>.*?)\n```(?:\n|$)",
+    re.DOTALL,
+)
+_EPISODE_EVIDENCE_PATTERN = re.compile(
+    r"(?:^|\n)## Episode Evidence\n```json\n"
+    r"(?P<evidence>.*?)\n```(?:\n|$)",
+    re.DOTALL,
+)
+_RETRIEVAL_SIGNATURE_PATTERN = re.compile(
+    r"(?:^|\n)## Retrieval Signature\n```json\n"
+    r"(?P<signature>.*?)\n```(?:\n|$)",
     re.DOTALL,
 )
 
@@ -80,6 +91,9 @@ _SOURCE_FIELDS = (
     "captured_at",
     "resolved_at",
     "created_at",
+    "description",
+    "failed_step",
+    "episode_evidence",
 )
 _FRONTMATTER_FIELDS = (
     "schema_version",
@@ -222,6 +236,7 @@ class MemoryDraft:
     failure_summary: str
     recovery_summary: str
     lessons: tuple[str, ...] = ()
+    signature: Mapping[str, Any] | None = None
     model: str = "gpt-5.6-luna"
     response_id: str | None = None
 
@@ -244,6 +259,11 @@ class MemoryDraft:
             _required_draft_text(lesson, "lesson")
             for lesson in self.lessons
         )
+        signature = (
+            validate_episode_evidence(dict(self.signature))
+            if self.signature is not None
+            else None
+        )
 
         if self.actionable and self.memory_kind != "positive":
             raise MemoryDraftError(
@@ -265,6 +285,7 @@ class MemoryDraft:
         object.__setattr__(self, "failure_summary", failure_summary)
         object.__setattr__(self, "recovery_summary", recovery_summary)
         object.__setattr__(self, "lessons", lessons)
+        object.__setattr__(self, "signature", signature)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "response_id", response_id)
 
@@ -283,6 +304,8 @@ class MemoryDocument:
     frontmatter: Mapping[str, Any]
     dispatched_actions: tuple[Mapping[str, Any], ...]
     body: str
+    episode_evidence: Mapping[str, Any] | None = None
+    retrieval_signature: Mapping[str, Any] | None = None
 
     @property
     def resolution_id(self) -> str:
@@ -326,6 +349,10 @@ def resolution_source_from_row(row: Mapping[str, Any]) -> ResolutionSource:
     payload["failure_id"] = failure_id
     payload["outcome"] = _optional_row_text(row, "outcome") or "recorded"
     payload["applied"] = applied
+    if payload.get("episode_evidence") is not None:
+        payload["episode_evidence"] = validate_episode_evidence(
+            payload["episode_evidence"]
+        )
     navigation = row.get("navigation")
     current_map = (
         navigation.get("current_map")
@@ -762,11 +789,38 @@ def parse_memory_document(path: Path) -> MemoryDocument:
             "Memory action_count does not match dispatched actions"
         )
 
+    evidence: Mapping[str, Any] | None = None
+    evidence_match = _EPISODE_EVIDENCE_PATTERN.search(body)
+    if evidence_match is not None:
+        try:
+            parsed_evidence = json.loads(evidence_match.group("evidence"))
+        except (TypeError, ValueError) as error:
+            raise MemoryFormatError("Episode-evidence JSON is invalid") from error
+        if parsed_evidence is not None:
+            try:
+                evidence = validate_episode_evidence(parsed_evidence)
+            except ValueError as error:
+                raise MemoryFormatError("Episode evidence is invalid") from error
+    signature: Mapping[str, Any] | None = None
+    signature_match = _RETRIEVAL_SIGNATURE_PATTERN.search(body)
+    if signature_match is not None:
+        try:
+            parsed_signature = json.loads(signature_match.group("signature"))
+        except (TypeError, ValueError) as error:
+            raise MemoryFormatError("Retrieval-signature JSON is invalid") from error
+        if parsed_signature is not None:
+            try:
+                signature = validate_episode_evidence(parsed_signature)
+            except ValueError as error:
+                raise MemoryFormatError("Retrieval signature is invalid") from error
+
     return MemoryDocument(
         path=path,
         frontmatter=frontmatter,
         dispatched_actions=tuple(actions),
         body=body,
+        episode_evidence=evidence,
+        retrieval_signature=signature,
     )
 
 
@@ -816,6 +870,21 @@ def _render_memory(draft: MemoryDraft) -> str:
         allow_nan=False,
         sort_keys=True,
     )
+    episode_evidence = payload.get("episode_evidence")
+    evidence_json = json.dumps(
+        episode_evidence,
+        ensure_ascii=False,
+        indent=2,
+        allow_nan=False,
+        sort_keys=True,
+    )
+    signature_json = json.dumps(
+        draft.signature,
+        ensure_ascii=False,
+        indent=2,
+        allow_nan=False,
+        sort_keys=True,
+    )
     # Model-generated prose is quoted line-by-line. It therefore cannot inject
     # a second executable-looking JSON section into the Markdown structure.
     lessons = (
@@ -839,6 +908,7 @@ def _render_memory(draft: MemoryDraft) -> str:
         f"- Area: {_body_scalar(payload.get('area_name'))}",
         f"- Item: {_body_scalar(payload.get('item_name'))}",
         f"- Failed command: {_body_scalar(payload.get('failed_command'))}",
+        f"- Failed step: {_body_scalar(payload.get('failed_step'))}",
         f"- Outcome: {_body_scalar(payload.get('outcome'))}",
         f"- Applied: {'yes' if payload.get('applied') else 'no'}",
         f"- Actionable: {'yes' if draft.actionable else 'no'}",
@@ -860,6 +930,16 @@ def _render_memory(draft: MemoryDraft) -> str:
             "",
             "## Context",
             *context,
+            "",
+            "## Retrieval Signature",
+            "```json",
+            signature_json,
+            "```",
+            "",
+            "## Episode Evidence",
+            "```json",
+            evidence_json,
+            "```",
             "",
             "## Dispatched Actions",
             "```json",
