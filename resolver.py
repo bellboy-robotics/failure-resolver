@@ -471,6 +471,7 @@ class FailureResolverProcessor:
                 for document in index.values()
                 if _is_safe_execution_candidate(document)
             )
+            safe_documents = await self._without_revoked(safe_documents)
             if not safe_documents:
                 await self._finish_failure(
                     failure_id,
@@ -778,6 +779,41 @@ class FailureResolverProcessor:
         return _retrieval_no_solution(
             read_documents.values(),
             "The memory retrieval turn budget was exhausted.",
+        )
+
+    async def _without_revoked(
+        self,
+        documents: tuple[MemoryDocument, ...],
+    ) -> tuple[MemoryDocument, ...]:
+        """Drop memories whose source resolution an operator has revoked."""
+        if not documents:
+            return documents
+        client = self._required_client()
+        response = await (
+            client.table(self.resolutions_table)
+            .select("resolution_id")
+            .in_(
+                "resolution_id",
+                [document.resolution_id for document in documents],
+            )
+            .not_.is_("revoked_at", "null")
+            .execute()
+        )
+        revoked = {
+            row.get("resolution_id")
+            for row in (response.data or [])
+            if row.get("resolution_id")
+        }
+        if not revoked:
+            return documents
+        logger.info(
+            "Excluded %d revoked memories from matching",
+            len(revoked),
+        )
+        return tuple(
+            document
+            for document in documents
+            if document.resolution_id not in revoked
         )
 
     async def learn_resolution(

@@ -47,6 +47,8 @@ class FakeQuery:
         self.table = table
         self.columns: str | None = None
         self.filters: list[tuple[str, Any]] = []
+        self.predicates: list[Any] = []
+        self._negate_next = False
         self.limit_value: int | None = None
         self.order_column: str | None = None
         self.update_values: dict[str, Any] | None = None
@@ -60,9 +62,26 @@ class FakeQuery:
         return self
 
     def is_(self, column: str, value: Any) -> "FakeQuery":
-        self.filters.append(
-            (column, None if value == "null" else value)
+        target = None if value == "null" else value
+        if self._negate_next:
+            self._negate_next = False
+            self.predicates.append(
+                lambda row, c=column, t=target: row.get(c) != t
+            )
+        else:
+            self.filters.append((column, target))
+        return self
+
+    def in_(self, column: str, values: Any) -> "FakeQuery":
+        allowed = list(values)
+        self.predicates.append(
+            lambda row, c=column, a=allowed: row.get(c) in a
         )
+        return self
+
+    @property
+    def not_(self) -> "FakeQuery":
+        self._negate_next = True
         return self
 
     def limit(self, value: int) -> "FakeQuery":
@@ -83,6 +102,7 @@ class FakeQuery:
             row
             for row in self.client.tables.get(self.table, [])
             if all(row.get(column) == value for column, value in self.filters)
+            and all(predicate(row) for predicate in self.predicates)
         ]
         if self.order_column is not None:
             rows = sorted(
