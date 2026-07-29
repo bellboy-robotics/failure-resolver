@@ -50,9 +50,12 @@ _SESSION_STATUSES = frozenset(
         "failed",
         "unknown",
         "timed_out",
+        "cancelled",
     )
 )
-_TERMINAL_SESSION_STATUSES = frozenset(("recovered", "unknown", "timed_out"))
+_TERMINAL_SESSION_STATUSES = frozenset(
+    ("recovered", "unknown", "timed_out", "cancelled")
+)
 _SUCCESS_FLOW_STATUSES = frozenset(
     ("ready", "completed", "complete", "finished", "succeeded", "success")
 )
@@ -119,6 +122,7 @@ class RecoveryExecutionSettings:
     cf_access_client_secret: str = field(default="", repr=False)
     reconcile_limit: int = 500
     reconcile_interval_seconds: float = 30.0
+    start_grace_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         normalized: list[str] = []
@@ -146,6 +150,10 @@ class RecoveryExecutionSettings:
             raise ValueError("RECOVERY_LEASE_SECONDS must be between 5 and 900")
         if self.reconcile_limit <= 0:
             raise ValueError("reconcile_limit must be greater than zero")
+        if self.start_grace_seconds < 0:
+            raise ValueError(
+                "RECOVERY_START_GRACE_SECONDS must be zero or greater"
+            )
         if (
             self.reconcile_interval_seconds <= 0
             or self.reconcile_interval_seconds >= self.lease_seconds
@@ -1083,6 +1091,29 @@ class RecoveryCoordinator:
                 "RECOVERY_LEASE_SECONDS is shorter than this pinned plan's "
                 "worst-case command and Flow observation window"
             )
+
+        if self.settings.start_grace_seconds > 0:
+            # Operator cancellation window: the session is already visible as
+            # "ready" through the mirrored failure row, so hold the first
+            # claim long enough for a human to cancel it. The claim RPC's
+            # ready/failed guard is the atomic backstop for late cancels.
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(),
+                    timeout=self.settings.start_grace_seconds,
+                )
+            except asyncio.TimeoutError:
+                pass
+            if self._stop_event.is_set():
+                return
+            graced = parse_recovery_session(
+                await database.project(
+                    recovery_session_id=recovery_session_id,
+                )
+            )
+            if graced.recovery_status not in ("ready", "failed"):
+                self.state.events_skipped += 1
+                return
 
         active = _ActiveRecovery(
             recovery_session_id=recovery_session_id,

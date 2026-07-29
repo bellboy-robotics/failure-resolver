@@ -164,6 +164,7 @@ class ResolverSettings:
     recovery_outcome_timeout_seconds: float = 60.0
     recovery_lease_seconds: int = 300
     recovery_reconcile_interval_seconds: float = 30.0
+    recovery_start_grace_seconds: float = 5.0
     recovery_cf_access_client_id: str = field(default="", repr=False)
     recovery_cf_access_client_secret: str = field(default="", repr=False)
 
@@ -320,6 +321,11 @@ class ResolverSettings:
                 "RECOVERY_RECONCILE_INTERVAL_SECONDS",
                 30.0,
             ),
+            recovery_start_grace_seconds=_nonnegative_float(
+                environment,
+                "RECOVERY_START_GRACE_SECONDS",
+                5.0,
+            ),
             recovery_cf_access_client_id=environment.get(
                 "RECOVERY_CF_ACCESS_CLIENT_ID",
                 "",
@@ -358,6 +364,7 @@ class ResolverSettings:
             reconcile_interval_seconds=(
                 self.recovery_reconcile_interval_seconds
             ),
+            start_grace_seconds=self.recovery_start_grace_seconds,
         )
 
 
@@ -1907,6 +1914,23 @@ def _positive_float(
         raise ValueError(f"{name} must be a number") from error
     if value <= 0:
         raise ValueError(f"{name} must be greater than zero")
+    return value
+
+
+def _nonnegative_float(
+    environment: Mapping[str, str],
+    name: str,
+    default: float,
+) -> float:
+    raw_value = environment.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a number") from error
+    if value < 0:
+        raise ValueError(f"{name} must be zero or greater")
     return value
 
 

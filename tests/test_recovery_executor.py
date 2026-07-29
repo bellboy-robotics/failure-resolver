@@ -681,6 +681,7 @@ def execution_settings(
     *,
     max_attempts: int = 3,
     reconcile_interval_seconds: float = 5,
+    start_grace_seconds: float = 0.0,
 ) -> RecoveryExecutionSettings:
     return RecoveryExecutionSettings(
         enabled=True,
@@ -692,6 +693,7 @@ def execution_settings(
         reconcile_interval_seconds=reconcile_interval_seconds,
         cf_access_client_id="client-id",
         cf_access_client_secret="client-secret",
+        start_grace_seconds=start_grace_seconds,
     )
 
 
@@ -1192,6 +1194,34 @@ async def test_coordinator_prepares_claims_and_runs_exact_order_to_advancement(
     assert coordinator.state.attempts_claimed == 1
     assert coordinator.state.attempts_recovered == 1
     assert coordinator.state.actions_accepted == 2
+
+
+@pytest.mark.anyio
+async def test_operator_cancel_during_start_grace_prevents_claim() -> None:
+    log: list[tuple[Any, ...]] = []
+
+    class CancellingDatabase(FakeRecoveryDatabase):
+        async def project(self, *, recovery_session_id: str):
+            assert self.session is not None
+            self.session["recovery_status"] = "cancelled"
+            return await super().project(
+                recovery_session_id=recovery_session_id
+            )
+
+    database = CancellingDatabase(failure_row(), log)
+    session = FakeRobotSession([pointer(2)], log)
+    coordinator = RecoveryCoordinator(
+        execution_settings(start_grace_seconds=0.01),
+        database=database,
+        sessions={"BILLIE-16": session},
+    )
+
+    await coordinator.process_failure(FAILURE_ID)
+
+    labels = [entry[0] for entry in log]
+    assert "claim" not in labels
+    assert coordinator.state.attempts_claimed == 0
+    assert session.commands == []
 
 
 @pytest.mark.anyio
