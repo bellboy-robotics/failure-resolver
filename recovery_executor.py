@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import logging
 import math
 import re
 import uuid
@@ -31,6 +32,8 @@ from robot_session import (
     parse_flow_pointer,
 )
 
+
+logger = logging.getLogger("failure_resolver.recovery")
 
 _UUID_PATTERN = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
