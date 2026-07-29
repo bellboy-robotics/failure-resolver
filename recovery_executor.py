@@ -850,6 +850,11 @@ class RecoveryCoordinator:
         except Exception as error:
             self.state.execution_errors += 1
             self.state.last_error_type = type(error).__name__
+            logger.exception(
+                "Automatic recovery processing failed failure_id=%s: %s",
+                failure_id,
+                error,
+            )
         finally:
             self._pending_failure_ids.discard(failure_id)
             replay = failure_id in self._dirty_failure_ids
@@ -964,6 +969,12 @@ class RecoveryCoordinator:
                 # connected and paused on the exact same step again.
                 self.state.events_skipped += 1
                 self.state.last_error_type = type(error).__name__
+                logger.warning(
+                    "Automatic recovery deferred failure_id=%s error=%s: %s",
+                    target.failure_id,
+                    type(error).__name__,
+                    error,
+                )
 
     async def _attach_active_recurrence(
         self,
