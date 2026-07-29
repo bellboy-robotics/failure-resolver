@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import uuid
 from collections import deque
@@ -84,7 +85,9 @@ def robot_websocket_url(sysid: str) -> str:
     canonical = sysid.strip()
     if not _SYSID_PATTERN.fullmatch(canonical):
         raise ValueError("robot sysid must be a safe hostname label")
-    return f"wss://{canonical.lower()}.ws.devices.bellboy.co/"
+    # gateway=1 is the service-client contract the failure detector already
+    # connects with; without it the robot endpoint never accepts the session.
+    return f"wss://{canonical.lower()}.ws.devices.bellboy.co/?gateway=1"
 
 
 def _text(value: Any) -> str | None:
@@ -331,9 +334,15 @@ class RobotSession:
                         await self._handle_message(receive_task.result())
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 if stop_event.is_set():
                     return
+                logging.getLogger("failure_resolver.robot_session").warning(
+                    "Robot websocket connection failed sysid=%s error=%s: %s",
+                    self.sysid,
+                    type(error).__name__,
+                    error,
+                )
             finally:
                 if self._websocket is websocket:
                     await self._invalidate_connection()
