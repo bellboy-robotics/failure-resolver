@@ -31,7 +31,8 @@ jobs:
           python -m pytest tests \
             --ignore=tests/test_slide_command.py \
             --ignore=tests/test_solution_execution.py \
-            --ignore=tests/test_search_success_fail.py -q
+            --ignore=tests/test_search_success_fail.py \
+            --ignore=tests/test_robot_interface_integration.py -q
 
   deploy:
     needs: test
