@@ -195,7 +195,7 @@ variable "recovery_reconcile_interval_seconds" {
 variable "memory_repo_url" {
   description = "HTTPS Git repository that is the Markdown resolution-memory ground truth."
   type        = string
-  default     = "https://github.com/bellboy-robotics/failure-resolver-database.git"
+  default     = "https://github.com/bellboy-robotics/failure-resolver-memories.git"
 
   validation {
     condition     = can(regex("^https://github\\.com/[^/]+/[^/]+(?:\\.git)?$", trimspace(var.memory_repo_url)))

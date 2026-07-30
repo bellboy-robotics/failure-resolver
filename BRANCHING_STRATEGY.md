@@ -3,7 +3,7 @@
 ## Branch Structure
 
 ```
-failure-resolver-database/
+failure-resolver-memories/
 ├── main
 │   └── Production failures (stable, verified)
 │       └── Used by: production robots
@@ -108,7 +108,7 @@ docker exec failure-resolver python3 import_failures.py test_batch.csv
 python3 sync_database.py "Test: 5 new failures for validation" develop
 
 # Results:
-# https://github.com/bellboy-robotics/failure-resolver-database/tree/develop
+# https://github.com/bellboy-robotics/failure-resolver-memories/tree/develop
 ```
 
 ### Day 2: Validation
@@ -118,8 +118,8 @@ python3 sync_database.py "Test: 5 new failures for validation" develop
 # Check for false positives
 
 # If validated, merge to production:
-git clone https://github.com/bellboy-robotics/failure-resolver-database.git
-cd failure-resolver-database
+git clone https://github.com/bellboy-robotics/failure-resolver-memories.git
+cd failure-resolver-memories
 git checkout main
 git merge develop
 python3 ../sync_database.py "Validated and merged from develop" main
@@ -129,7 +129,7 @@ python3 ../sync_database.py "Validated and merged from develop" main
 ```bash
 # Production robots now use main branch
 # Latest failures available for resolution
-git clone -b main https://github.com/bellboy-robotics/failure-resolver-database.git
+git clone -b main https://github.com/bellboy-robotics/failure-resolver-memories.git
 ```
 
 ---
@@ -139,8 +139,8 @@ git clone -b main https://github.com/bellboy-robotics/failure-resolver-database.
 ### Option 1: Git Merge (Simple)
 ```bash
 # Promote develop → main
-git clone https://github.com/bellboy-robotics/failure-resolver-database.git
-cd failure-resolver-database
+git clone https://github.com/bellboy-robotics/failure-resolver-memories.git
+cd failure-resolver-memories
 git checkout main
 git merge develop
 git push origin main
@@ -176,7 +176,7 @@ git merge develop
 FROM failure-resolver:latest
 
 RUN git clone -b main \
-    https://github.com/bellboy-robotics/failure-resolver-database.git \
+    https://github.com/bellboy-robotics/failure-resolver-memories.git \
     /app/memory
 ```
 
@@ -186,7 +186,7 @@ RUN git clone -b main \
 FROM failure-resolver:latest
 
 RUN git clone -b develop \
-    https://github.com/bellboy-robotics/failure-resolver-database.git \
+    https://github.com/bellboy-robotics/failure-resolver-memories.git \
     /app/memory
 ```
 
@@ -266,10 +266,10 @@ python3 sync_database.py "Validated: 50 failures ready for production" main
 ### List branches and contents
 ```bash
 # Via GitHub
-https://github.com/bellboy-robotics/failure-resolver-database/branches
+https://github.com/bellboy-robotics/failure-resolver-memories/branches
 
 # Via Git
-git clone https://github.com/bellboy-robotics/failure-resolver-database.git
+git clone https://github.com/bellboy-robotics/failure-resolver-memories.git
 git branch -a
 ```
 
@@ -331,11 +331,11 @@ jobs:
 
 **Next Steps:**
 
-1. Create GitHub repo: https://github.com/bellboy-robotics/failure-resolver-database
+1. Create GitHub repo: https://github.com/bellboy-robotics/failure-resolver-memories
 
 2. Create branches:
    ```bash
-   git clone https://github.com/bellboy-robotics/failure-resolver-database.git
+   git clone https://github.com/bellboy-robotics/failure-resolver-memories.git
    git checkout -b develop
    git push -u origin develop
    ```

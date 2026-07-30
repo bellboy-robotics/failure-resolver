@@ -13,7 +13,7 @@ bellboy-robotics/
 │   ├── requirements.txt
 │   └── sync_database.py (backup tool)
 │
-└── failure-resolver-database (data repo)
+└── failure-resolver-memories (data repo)
     ├── index.json (metadata index)
     ├── failures/
     │   ├── failure_d02819d9.md
@@ -86,7 +86,7 @@ docker exec failure-resolver python3 import_failures.py data.csv
 # 2. Sync to GitHub
 python3 sync_database.py "Added failures from 2026-07-28 run"
 
-# Done! Check: https://github.com/bellboy-robotics/failure-resolver-database
+# Done! Check: https://github.com/bellboy-robotics/failure-resolver-memories
 ```
 
 ---
@@ -124,7 +124,7 @@ Database Sync to GitHub
 
 ============================================================
 ✅ Database synced to GitHub!
-  Repo: https://github.com/bellboy-robotics/failure-resolver-database
+  Repo: https://github.com/bellboy-robotics/failure-resolver-memories
 ============================================================
 ```
 
@@ -142,9 +142,9 @@ chmod +x backup_database.sh
 
 ```bash
 # Clone the database repo
-git clone https://github.com/bellboy-robotics/failure-resolver-database.git
-cp failure-resolver-database/index.json failure-resolver/memory/
-cp failure-resolver-database/failures/* failure-resolver/memory/failures/
+git clone https://github.com/bellboy-robotics/failure-resolver-memories.git
+cp failure-resolver-memories/index.json failure-resolver/memory/
+cp failure-resolver-memories/failures/* failure-resolver/memory/failures/
 
 # Regenerate Qdrant vectors from markdown
 docker exec failure-resolver python3 import_failures.py --restore-from-disk
@@ -154,7 +154,7 @@ docker exec failure-resolver python3 import_failures.py --restore-from-disk
 
 ```bash
 # Get specific failure from GitHub
-curl https://raw.githubusercontent.com/bellboy-robotics/failure-resolver-database/main/failures/failure_d02819d9.md \
+curl https://raw.githubusercontent.com/bellboy-robotics/failure-resolver-memories/main/failures/failure_d02819d9.md \
   > memory/failures/failure_d02819d9.md
 ```
 
@@ -192,7 +192,7 @@ jobs:
 
 **GitHub Setup:**
 
-1. Create `failure-resolver-database` repo (public or private)
+1. Create `failure-resolver-memories` repo (public or private)
 2. Grant write access to failure-resolver team
 3. Configure GitHub token in CI/CD (if automating)
 
@@ -252,12 +252,12 @@ GitHub has latest backup
 ✓ `sync_database.py` - Ready
 ✓ `backup_database.sh` - Ready
 ✓ Architecture defined
-⏳ `failure-resolver-database` repo - Needs creation on GitHub
+⏳ `failure-resolver-memories` repo - Needs creation on GitHub
 ⏳ GitHub token - Needs configuration
 
 **Next Steps:**
 1. Create repo: https://github.com/new (in bellboy-robotics org)
-   - Name: `failure-resolver-database`
+   - Name: `failure-resolver-memories`
    - Description: "Failure database for failure-resolver service"
    - Private/Public: Your choice
    
@@ -266,4 +266,4 @@ GitHub has latest backup
    python3 sync_database.py "Initial commit with 10 failures"
    ```
 
-3. Verify: https://github.com/bellboy-robotics/failure-resolver-database
+3. Verify: https://github.com/bellboy-robotics/failure-resolver-memories
