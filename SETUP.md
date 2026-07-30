@@ -11,36 +11,43 @@
 ## Architecture (Supabase-Based)
 
 ```
-Avidor (failure detection)
+Failure Detector
   ↓ (inserts row → Supabase failures table)
-Supabase (bellboy-failures)
+Supabase
+  ├─ failures table (new failure entries)
+  └─ solutions table (operator-recorded fixes)
   ↓
 Failure Resolver (polls Supabase)
+  
+  [On New Failure]
   ├─ Extract: robot_id, failure_story, context
   ├─ Search memory: similar failures (Qdrant)
-  ├─ Analyze: GPT-4 reasoning
-  ├─ Execute: commands on robot (Bellboy API)
+  ├─ Solution found?
+  │   ├─ YES → Execute commands on robot (Bellboy API)
+  │   └─ NO → Flag for operator
   └─ Store: result + analysis
-  ↓
-Sandy's UI (reads failures from Supabase)
-  ├─ Shows failure to operator
-  ├─ Operator drives robot → creates solution
-  └─ Inserts row → Supabase solutions table
-  ↓
-Failure Resolver (polls Supabase)
+  
+  [On New Solution]
   ├─ Index solution (embeddings + disk)
   ├─ Update metadata
   ├─ Store in failure-resolver-memories repo
   └─ Update Supabase with solution link
-  ↓
-Memory updated → next similar failure has solution
+  
+  ↓ (Memory updated → next similar failure has solution)
+
+Billie-UI
+  ├─ Reads failures from Supabase
+  ├─ Shows failure to operator (if no auto-fix)
+  ├─ Operator drives robot manually
+  ├─ Records fix as command list
+  └─ Inserts to Supabase solutions table (with reference to failure entry)
 ```
 
 **Benefits:**
 - ✅ Decoupled: Services via shared Supabase
 - ✅ Scalable: Multiple resolvers can poll independently
 - ✅ Observable: Full audit trail in Supabase
-- ✅ Autonomous: Executes solutions directly on robot
+- ✅ Autonomous: Executes solutions automatically, learns from operator fixes
 
 ## Technology Stack
 
@@ -97,7 +104,7 @@ docker exec failure-resolver python3 import_failures.py failures.csv
 
 ### Failure Detection → Analysis
 
-**Avidor inserts to Supabase:**
+**Failure Detector inserts to Supabase:**
 ```json
 {
   "robot_id": "BILLIE-16",
@@ -136,7 +143,7 @@ docker exec failure-resolver python3 import_failures.py failures.csv
 
 ### Solution Learning
 
-**Sandy inserts to Supabase (after operator records solution):**
+**Billie-UI inserts to Supabase (after operator records solution):**
 ```json
 {
   "robot_id": "BILLIE-16",
@@ -271,15 +278,15 @@ For direct integration before Supabase wiring:
 ## Integration Checklist
 
 - [ ] Supabase project created with failures + solutions tables
-- [ ] Avidor configured to insert failures into Supabase
+- [ ] Failure Detector configured to insert failures into Supabase
 - [ ] BELLBOY_API_KEY configured in .env
 - [ ] OPENAI_API_KEY configured in .env
 - [ ] `docker-compose up` runs without errors
 - [ ] Robot interface test passes (`test_commands.py`)
 - [ ] Memory test passes (`test_memory_management.py`)
 - [ ] Failure data imported (`import_failures.py`)
-- [ ] SQS/Supabase polling integrated in main.py
-- [ ] Sandy's UI wired to Supabase solutions table
+- [ ] Supabase polling integrated in main.py (failures + solutions)
+- [ ] Billie-UI wired to Supabase solutions table
 - [ ] Solution execution tested on actual robot
 
 ---
