@@ -457,19 +457,22 @@ class FailureResolverProcessor:
         self.state = ResolverState()
         self._known_commit_shas: dict[str, str] = {}
 
-    def _store_for(self, row: Mapping[str, Any]) -> MarkdownMemoryStore:
-        """Site 0 is the dev site: its memories live on the dev branch and
-        never mix into the production (main) memory set. A row without a
-        resolved site is treated as dev so unlocated data cannot reach main.
+    async def _store_for(self, row: Mapping[str, Any]) -> MarkdownMemoryStore:
+        """Production robots use the main memory branch; everything else —
+        dev robots, unknown sysids, missing robot rows — stays on the dev
+        branch so unvetted data can never reach the production memory set.
+        The robots table's production flag is the same authority the UI's
+        operator gate uses.
         """
         if self.dev_memory_store is None:
             return self.memory_store
-        site_id = row.get("site_id")
-        try:
-            is_production_site = site_id is not None and int(site_id) != 0
-        except (TypeError, ValueError):
-            is_production_site = False
-        return self.memory_store if is_production_site else self.dev_memory_store
+        raw_sysid = row.get("sysid")
+        sysid = str(raw_sysid).strip() if raw_sysid is not None else ""
+        if not sysid:
+            return self.dev_memory_store
+        robot = await self._fetch_row("robots", "sysid", sysid)
+        is_production = bool(robot and robot.get("production") is True)
+        return self.memory_store if is_production else self.dev_memory_store
 
     async def process_failure(self, failure_id: str) -> FailureMatch | None:
         row = await self._fetch_row(
@@ -495,7 +498,7 @@ class FailureResolverProcessor:
 
         self.state.failures_claimed += 1
         self.state.last_failure_id = failure_id
-        memory_store = self._store_for(row)
+        memory_store = await self._store_for(row)
         try:
             index = await memory_store.arebuild_index(refresh=True)
             safe_documents = tuple(
@@ -888,9 +891,9 @@ class FailureResolverProcessor:
                 linked_failure,
             )
             memory_row = _row_with_successful_actions(episode_row)
-            # The joined row carries the failure's resolved site, so the memory
-            # lands on the branch its site owns (0/dev vs production/main).
-            memory_store = self._store_for(memory_row)
+            # The row's robot decides the branch: production robots write to
+            # main, everything else to the dev branch.
+            memory_store = await self._store_for(memory_row)
             source = resolution_source_from_row(memory_row)
             if await memory_store.ahas_source_hash(
                 source.resolution_id,

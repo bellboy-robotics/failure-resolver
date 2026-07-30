@@ -204,7 +204,7 @@ variable "memory_repo_url" {
 }
 
 variable "memory_repo_branch" {
-  description = "Branch for production-site memories (every site except 0)."
+  description = "Branch for production robots' memories."
   type        = string
   default     = "main"
 
@@ -219,7 +219,7 @@ variable "memory_repo_branch" {
 }
 
 variable "memory_repo_dev_branch" {
-  description = "Branch for dev-site memories (site_id 0 or unlocated)."
+  description = "Branch for non-production robots (and unknown sysids)."
   type        = string
   default     = "failure-resolver-dev"
 

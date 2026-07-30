@@ -1205,9 +1205,13 @@ async def test_unprovided_or_non_candidate_memory_id_fails_closed(
 
 
 @pytest.mark.anyio
-async def test_site_zero_memory_routes_to_dev_store() -> None:
-    # resolution_row/failure fixtures are site_id 0 — the dev site.
-    client = FakeClient({"flow_failure_resolutions": [resolution_row()]})
+async def test_dev_robot_memory_routes_to_dev_store() -> None:
+    client = FakeClient(
+        {
+            "flow_failure_resolutions": [resolution_row()],
+            "robots": [{"sysid": "BILLIE-16", "production": False}],
+        }
+    )
     agent = FakeAgent(generalization=generalization())
     store = FakeMemoryStore()
     dev_store = FakeMemoryStore()
@@ -1221,10 +1225,13 @@ async def test_site_zero_memory_routes_to_dev_store() -> None:
 
 
 @pytest.mark.anyio
-async def test_production_site_memory_routes_to_main_store() -> None:
-    row = resolution_row()
-    row["site_id"] = 7
-    client = FakeClient({"flow_failure_resolutions": [row]})
+async def test_production_robot_memory_routes_to_main_store() -> None:
+    client = FakeClient(
+        {
+            "flow_failure_resolutions": [resolution_row()],
+            "robots": [{"sysid": "BILLIE-16", "production": True}],
+        }
+    )
     agent = FakeAgent(generalization=generalization())
     store = FakeMemoryStore()
     dev_store = FakeMemoryStore()
@@ -1235,6 +1242,21 @@ async def test_production_site_memory_routes_to_main_store() -> None:
     assert result is not None
     assert len(store.writes) == 1
     assert dev_store.writes == []
+
+
+@pytest.mark.anyio
+async def test_unknown_robot_memory_routes_to_dev_store() -> None:
+    client = FakeClient({"flow_failure_resolutions": [resolution_row()]})
+    agent = FakeAgent(generalization=generalization())
+    store = FakeMemoryStore()
+    dev_store = FakeMemoryStore()
+    service = processor(client, agent, store, dev_store)
+
+    result = await service.learn_resolution(RESOLUTION_ID)
+
+    assert result is not None
+    assert store.writes == []
+    assert len(dev_store.writes) == 1
 
 
 @pytest.mark.anyio
