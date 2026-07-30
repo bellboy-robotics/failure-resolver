@@ -1,0 +1,26 @@
+name: Test
+
+on:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install runtime and test dependencies
+        run: |
+          pip install -r requirements-observer.txt
+          pip install -r requirements-observer-dev.txt python-dotenv
+      # Same exclusions as the deploy gate: legacy suites with broken async
+      # collection that never ran in CI.
+      - name: Run tests
+        run: |
+          python -m pytest tests \
+            --ignore=tests/test_slide_command.py \
+            --ignore=tests/test_solution_execution.py \
+            --ignore=tests/test_search_success_fail.py \
+            --ignore=tests/test_robot_interface_integration.py -q
