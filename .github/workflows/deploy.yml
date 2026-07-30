@@ -69,7 +69,7 @@ jobs:
           context: .
           push: true
           provenance: false
-          tags: ${{ steps.ecr.outputs.registry }}/failure-resolver-poc:${{ github.sha }}
+          tags: ${{ steps.ecr.outputs.registry }}/failure-resolver-poc:${{ github.sha }}.${{ github.run_id }}.${{ github.run_attempt }}
 
       - uses: hashicorp/setup-terraform@v3
 
