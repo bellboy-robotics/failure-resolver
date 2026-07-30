@@ -40,3 +40,4 @@ crash.*.log
 # - memory/index.json
 # - memory/failures/*.md
 !terraform/ci.tfvars
+!terraform/backend.tf
