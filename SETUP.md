@@ -1,5 +1,9 @@
 # Failure Resolver - Setup Guide
 
+> **Legacy prototype guide:** the current Docker image runs `resolver.py` as
+> documented in `README.md`. The Qdrant, SQS, and robot-action architecture
+> below is retained for reference and is not started by the default container.
+
 ## Overview
 
 **Failure Resolver** is an autonomous failure detection, analysis, and resolution system for Bellboy robots. It monitors failures from Avidor (via Supabase), searches semantic memory for similar cases, analyzes with GPT-4, executes solutions on the robot, and learns from operator feedback recorded by Sandy's UI.
@@ -26,7 +30,7 @@ Failure Resolver (polls Supabase)
   [On New Solution]
   ├─ Index solution (embeddings + disk)
   ├─ Update metadata
-  ├─ Store in failure-resolver-database repo
+  ├─ Store in failure-resolver-memories repo
   └─ Update Supabase with solution link
   
   ↓ (Memory updated → next similar failure has solution)
@@ -55,7 +59,7 @@ Billie-UI
 | **LLM** | GPT-4 (OpenAI) | Failure analysis and reasoning |
 | **Semantic Search** | Qdrant vector DB | Embeddings-based failure matching |
 | **Embeddings** | sentence-transformers | Generate failure vectors |
-| **Memory** | failure-resolver-database (separate repo) | Persistent failure + solution storage |
+| **Memory** | failure-resolver-memories (separate repo) | Persistent failure + solution storage |
 | **Container** | Docker + Docker Compose | Local dev, cloud deployment |
 | **Database** | Supabase (PostgreSQL) | Real-time failure/solution records |
 
@@ -158,7 +162,7 @@ docker exec failure-resolver python3 import_failures.py failures.csv
 1. Generate embedding for solution
 2. Store to disk + Qdrant
 3. Update metadata index
-4. Push to failure-resolver-database repo (develop branch for testing, main for production)
+4. Push to failure-resolver-memories repo (develop branch for testing, main for production)
 5. Update Supabase with "indexed" status
 
 ---
@@ -174,7 +178,7 @@ memory/ (local)
     ├── failure_ee891806.md
     └── ... (human-readable, version-controlled)
 
-failure-resolver-database/ (separate repo)
+failure-resolver-memories/ (separate repo)
 ├── develop/
 │   ├── index.json          # Test failure metadata
 │   └── failures/*.md       # Test failure cases

@@ -1,41 +1,104 @@
-# Billie Memory Service
+# Failure Resolver
 
-Failure analysis and solution memory system for Billie the robot.
+The default container runs `resolver.py`, the online Supabase and Markdown
+memory agent. It:
 
-**See [SETUP.md](./SETUP.md) for architecture and detailed setup instructions.**
+- subscribes to `failure_events` and `flow_failure_resolutions`;
+- reconciles pending failures and successful demonstrated resolutions on
+  startup, so Realtime is not the durable queue;
+- changes a pending failure to `matching`, then `solution_found`,
+  `no_solution`, or `failed`;
+- rebuilds a deterministic search index from Git-backed Markdown memory;
+- lets OpenAI search, read, refine, and select an exact memory ID within hard
+  retrieval budgets (small memory sets are read exhaustively);
+- generalizes successful operator-demonstrated resolutions into Markdown; and
+- commits and pushes those memories to the configured repository.
 
-## Quick Start
+Automatic robot execution is disabled by default. When explicitly enabled for
+an allowlisted robot, a separate coordinator claims a database-backed recovery
+session, executes the selected memory's exact demonstrated correction actions
+in order, and sends one guarded `$resume_flow` continuation. Search and model
+output cannot create or modify executable actions.
+
+## Run locally
 
 ```bash
-# Copy env
 cp .env.example .env
-
-# Edit .env with your ANTHROPIC_API_KEY
-nano .env
-
-# Start service
-docker-compose up --build
-
-# Test
-curl -X POST http://localhost:8000/analyze-failure \
-  -H "Content-Type: application/json" \
-  -d '{"failure_story": "Gripper pressure too high"}'
+# Fill the required secrets in .env.
+docker compose up --build
 ```
 
-## API
+Required server-side values:
 
-- `POST /analyze-failure` — Search memory for similar failures + propose solution
-- `POST /index-solution` — Store new solution from operator
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `OPENAI_API_KEY`
+- `GITHUB_TOKEN`
 
-See SETUP.md for full API spec.
+`GITHUB_TOKEN` needs read/write access only to `MEMORY_REPO_URL`. The image
+passes it to Git through `/app/git-askpass.sh`; interactive credential prompts
+are disabled. Never commit `.env` or put these credentials in browser code.
 
-## Stack
+The main optional settings are:
 
-- LangGraph (agent orchestration)
-- GPT-4 API (OpenAI) (reasoning)
-- Qdrant (semantic search)
-- FastAPI (HTTP service)
+- `OPENAI_MODEL` (default `gpt-5.6-luna`)
+- `FAILURE_EVENTS_TABLE` (default `failure_events`)
+- `FLOW_FAILURE_RESOLUTIONS_TABLE` (default
+  `flow_failure_resolutions`)
+- `MEMORY_REPO_URL`
+- `MEMORY_REPO_BRANCH` (default `failure-resolver-dev`)
+- `MEMORY_REPO_ROOT` (default
+  `/var/lib/failure-resolver/repository`)
+- `RESOLVER_AUTO_EXECUTE` (default `false`)
+- `RECOVERY_ROBOT_ALLOWLIST` (required when auto execution is enabled)
+- `RECOVERY_MAX_ATTEMPTS` (default `3`)
+- `RECOVERY_COMMAND_TIMEOUT_SECONDS` (default `15`)
+- `RECOVERY_OUTCOME_TIMEOUT_SECONDS` (default `60`)
+- `RECOVERY_LEASE_SECONDS` (default `300`; with auto execution enabled,
+  must be at least
+  `10 * RECOVERY_COMMAND_TIMEOUT_SECONDS + RECOVERY_OUTCOME_TIMEOUT_SECONDS + 5`)
+- `RECOVERY_RECONCILE_INTERVAL_SECONDS` (default `30`, must be shorter
+  than the lease)
+- `LOG_LEVEL` and `PORT`
 
-## Phase 2
+Auto execution also requires server-side
+`RECOVERY_CF_ACCESS_CLIENT_ID` and `RECOVERY_CF_ACCESS_CLIENT_SECRET`.
+When `RESOLVER_AUTO_EXECUTE=true`, build the matching Cloud UI with
+`NEXT_PUBLIC_FAILURE_AUTO_RECOVERY_ENABLED=true`; when it is false, keep the
+Cloud flag false too. The paired PoC flags reserve suggested fixes for the
+automatic worker before its first database claim. A production version should
+replace them with one shared database claim for manual and automatic
+executors.
+Keep it off until the Cloud recovery migration is applied and the target robot
+Brain supports `$resume_flow`. A timeout, disconnect, stale Flow pointer, or
+ambiguous outcome becomes terminal `unknown`; it is not sent again. A
+definitive recurrence of the same failed step consumes another attempt, and
+the final failed attempt becomes `timed_out`.
 
-Can swap LangGraph for **Hermes Agent** if multi-platform UI needed. Memory structure stays the same.
+Compose mounts `/var/lib/failure-resolver` as a named volume so the checkout
+survives container replacement. Markdown Git history remains the authoritative
+memory; the local checkout can be recreated from the remote.
+
+## Health
+
+- `GET /health` — process liveness and resolver counters
+- `GET /readyz` — HTTP 200 only while both Supabase Realtime subscriptions are
+  connected
+
+The tables must be in the `supabase_realtime` publication. The service-role key
+is required because the agent reads both tables and atomically updates matcher
+state in `failure_events`.
+
+## Validate
+
+```bash
+python -m pip install -r requirements-observer-dev.txt
+python -m pytest -q tests/test_retrieval.py tests/test_agent.py \
+  tests/test_memory_store.py tests/test_observer.py tests/test_resolver.py \
+  tests/test_robot_session.py tests/test_recovery_executor.py
+docker compose config
+docker build -t failure-resolver:local .
+```
+
+The older Qdrant/SQS/robot-execution prototype remains in this repository for
+reference, but it is not imported by the default container.

@@ -1,26 +1,52 @@
 FROM python:3.11-slim
 
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HOME=/home/resolver \
+    PORT=8000 \
+    RESOLVER_MODE=agent
+
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 resolver \
+    && useradd \
+        --uid 10001 \
+        --gid resolver \
+        --create-home \
+        --home-dir /home/resolver \
+        --shell /usr/sbin/nologin \
+        resolver \
+    && install --directory \
+        --owner resolver \
+        --group resolver \
+        /var/lib/failure-resolver
 
-# Copy requirements
-COPY requirements.txt .
+COPY requirements-observer.txt .
+RUN pip install --no-cache-dir -r requirements-observer.txt
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+COPY --chown=resolver:resolver \
+    agent.py \
+    episode_evidence.py \
+    memory_store.py \
+    observer.py \
+    recovery_executor.py \
+    robot_session.py \
+    retrieval.py \
+    resolver.py \
+    git-askpass.sh \
+    ./
 
-# Copy app code
-COPY . .
+RUN chmod 0555 /app/git-askpass.sh
 
-# Create memory directory and logs
-RUN mkdir -p memory/failures logs
+USER 10001:10001
 
-# Expose port
 EXPOSE 8000
 
-# Run the service
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["python", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('PORT', '8000') + '/health', timeout=2).read()"]
+
+CMD ["python", "-m", "resolver"]

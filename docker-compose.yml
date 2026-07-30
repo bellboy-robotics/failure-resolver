@@ -1,47 +1,49 @@
-version: '3.8'
-
 services:
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: failure-resolver-qdrant
-    ports:
-      - "6333:6333"
-    volumes:
-      - qdrant_storage:/qdrant/storage
-    environment:
-      - QDRANT_API_KEY=your-api-key
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  agent:
+  resolver:
     build: .
     container_name: failure-resolver
+    command: ["python", "-m", "resolver"]
     ports:
-      - "8000:8000"
-    volumes:
-      - ./memory:/app/memory
-      - ./logs:/app/logs
+      - "${PORT:-8000}:${PORT:-8000}"
     environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - BELLBOY_API_KEY=${BELLBOY_API_KEY}
-      - ROBOT_SYSID=${ROBOT_SYSID}
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
-      - DATABASE_URL=sqlite:///./memory/metadata.db
-      - MEMORY_DIR=./memory
-      - LOG_LEVEL=INFO
-    depends_on:
-      - qdrant
-    networks:
-      - default
+      RESOLVER_MODE: agent
+      SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL is required}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:?SUPABASE_SERVICE_ROLE_KEY is required}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY is required}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-luna}
+      FAILURE_EVENTS_TABLE: ${FAILURE_EVENTS_TABLE:-failure_events}
+      FLOW_FAILURE_RESOLUTIONS_TABLE: ${FLOW_FAILURE_RESOLUTIONS_TABLE:-flow_failure_resolutions}
+      MEMORY_REPO_URL: ${MEMORY_REPO_URL:-https://github.com/bellboy-robotics/failure-resolver-database.git}
+      MEMORY_REPO_BRANCH: ${MEMORY_REPO_BRANCH:-failure-resolver-dev}
+      MEMORY_REPO_ROOT: ${MEMORY_REPO_ROOT:-/var/lib/failure-resolver/repository}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN is required}
+      GIT_ASKPASS: /app/git-askpass.sh
+      GIT_TERMINAL_PROMPT: "0"
+      RESOLVER_AUTO_EXECUTE: ${RESOLVER_AUTO_EXECUTE:-false}
+      RECOVERY_ROBOT_ALLOWLIST: ${RECOVERY_ROBOT_ALLOWLIST:-}
+      RECOVERY_MAX_ATTEMPTS: ${RECOVERY_MAX_ATTEMPTS:-3}
+      RECOVERY_COMMAND_TIMEOUT_SECONDS: ${RECOVERY_COMMAND_TIMEOUT_SECONDS:-15}
+      RECOVERY_OUTCOME_TIMEOUT_SECONDS: ${RECOVERY_OUTCOME_TIMEOUT_SECONDS:-60}
+      RECOVERY_LEASE_SECONDS: ${RECOVERY_LEASE_SECONDS:-300}
+      RECOVERY_RECONCILE_INTERVAL_SECONDS: ${RECOVERY_RECONCILE_INTERVAL_SECONDS:-30}
+      RECOVERY_CF_ACCESS_CLIENT_ID: ${RECOVERY_CF_ACCESS_CLIENT_ID:-}
+      RECOVERY_CF_ACCESS_CLIENT_SECRET: ${RECOVERY_CF_ACCESS_CLIENT_SECRET:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PORT: ${PORT:-8000}
+    volumes:
+      - resolver-memory:/var/lib/failure-resolver
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.getenv('PORT', '8000') + '/health', timeout=2).read()",
+        ]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
 
 volumes:
-  qdrant_storage:
+  resolver-memory:

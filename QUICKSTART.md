@@ -1,5 +1,9 @@
 # Failure Resolver - Quick Start
 
+> **Legacy prototype guide:** the supported container now runs `resolver.py`
+> against Supabase and Git-backed Markdown memory. Use `README.md` for the
+> current launch path. The SQS/Qdrant commands below are historical reference.
+
 Your role: **Receive failure stories → Analyze with AI → Run solution on robot**
 
 ## 1. Load Initial Failures (One-time)

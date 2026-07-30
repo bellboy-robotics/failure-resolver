@@ -1,0 +1,26 @@
+aws_region         = "us-east-1"
+allowed_account_id = "000000000000"
+
+# The project URL is not a secret. Keep the service stopped until the image and
+# Secrets Manager value have both been populated.
+supabase_url = "https://your-project.supabase.co"
+desired_count = 0
+image_digest  = null
+openai_model  = "gpt-5.6-luna"
+memory_repo_url    = "https://github.com/bellboy-robotics/failure-resolver-memories.git"
+memory_repo_branch = "failure-resolver-dev"
+
+# Automatic robot commands are opt-in and require an explicit allowlist plus
+# Cloudflare Access credentials in the runtime secret.
+resolver_auto_execute = false
+# recovery_robot_allowlist           = ["BILLIE-16"]
+# recovery_max_attempts              = 3
+# recovery_command_timeout_seconds   = 15
+# recovery_outcome_timeout_seconds   = 60
+# recovery_lease_seconds             = 300
+# recovery_reconcile_interval_seconds = 30
+
+# Optional overrides:
+# vpc_cidr          = "10.43.0.0/16"
+# cpu_architecture  = "ARM64"
+# log_retention_days = 14
