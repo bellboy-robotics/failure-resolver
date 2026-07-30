@@ -13,10 +13,40 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install runtime and test dependencies
+        run: |
+          pip install -r requirements-observer.txt
+          pip install -r requirements-observer-dev.txt
+      # Three legacy suites have a known-broken async collection setup and
+      # never ran in CI; they must not hold the deploy gate.
+      - name: Run tests
+        run: |
+          python -m pytest tests \
+            --ignore=tests/test_slide_command.py \
+            --ignore=tests/test_solution_execution.py \
+            --ignore=tests/test_search_success_fail.py -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Temporary: surface the token's actual sub/aud/iss claims while the
+      # OIDC trust is being debugged. Claims only — never the token.
+      - name: Debug OIDC claims
+        run: |
+          TOKEN=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          PAD=$(( (4 - ${#PAYLOAD} % 4) % 4 ))
+          echo "$PAYLOAD$(printf '=%.0s' $(seq 1 $PAD 2>/dev/null))" | base64 -d 2>/dev/null | jq '{sub, aud, iss}' || true
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
