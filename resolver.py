@@ -147,6 +147,9 @@ class ResolverSettings:
     memory_repo_url: str = field(repr=False)
     memory_repo_root: Path
     memory_repo_branch: str = "main"
+    # Site 0 (the dev site) writes and matches here instead of the
+    # production branch.
+    memory_repo_dev_branch: str = "failure-resolver-dev"
     failure_events_table: str = "failure_events"
     resolutions_table: str = "flow_failure_resolutions"
     schema: str = "public"
@@ -201,6 +204,10 @@ class ResolverSettings:
             "/var/lib/failure-resolver/memory",
         ).strip()
         branch = environment.get("MEMORY_REPO_BRANCH", "main").strip()
+        dev_branch = environment.get(
+            "MEMORY_REPO_DEV_BRANCH",
+            "failure-resolver-dev",
+        ).strip()
         failure_table = environment.get(
             "FAILURE_EVENTS_TABLE",
             "failure_events",
@@ -252,6 +259,7 @@ class ResolverSettings:
             memory_repo_url=repo_url,
             memory_repo_root=Path(repo_root),
             memory_repo_branch=branch,
+            memory_repo_dev_branch=dev_branch,
             failure_events_table=failure_table,
             resolutions_table=resolutions_table,
             schema=schema,
@@ -437,15 +445,31 @@ class FailureResolverProcessor:
         resolutions_table: str,
         agent: FailureAgent,
         memory_store: MarkdownMemoryStore,
+        dev_memory_store: MarkdownMemoryStore | None = None,
         client: Any | None = None,
     ) -> None:
         self.failure_events_table = failure_events_table
         self.resolutions_table = resolutions_table
         self.agent = agent
         self.memory_store = memory_store
+        self.dev_memory_store = dev_memory_store
         self.client = client
         self.state = ResolverState()
         self._known_commit_shas: dict[str, str] = {}
+
+    def _store_for(self, row: Mapping[str, Any]) -> MarkdownMemoryStore:
+        """Site 0 is the dev site: its memories live on the dev branch and
+        never mix into the production (main) memory set. A row without a
+        resolved site is treated as dev so unlocated data cannot reach main.
+        """
+        if self.dev_memory_store is None:
+            return self.memory_store
+        site_id = row.get("site_id")
+        try:
+            is_production_site = site_id is not None and int(site_id) != 0
+        except (TypeError, ValueError):
+            is_production_site = False
+        return self.memory_store if is_production_site else self.dev_memory_store
 
     async def process_failure(self, failure_id: str) -> FailureMatch | None:
         row = await self._fetch_row(
@@ -471,8 +495,9 @@ class FailureResolverProcessor:
 
         self.state.failures_claimed += 1
         self.state.last_failure_id = failure_id
+        memory_store = self._store_for(row)
         try:
-            index = await self.memory_store.arebuild_index(refresh=True)
+            index = await memory_store.arebuild_index(refresh=True)
             safe_documents = tuple(
                 document
                 for document in index.values()
@@ -863,8 +888,11 @@ class FailureResolverProcessor:
                 linked_failure,
             )
             memory_row = _row_with_successful_actions(episode_row)
+            # The joined row carries the failure's resolved site, so the memory
+            # lands on the branch its site owns (0/dev vs production/main).
+            memory_store = self._store_for(memory_row)
             source = resolution_source_from_row(memory_row)
-            if await self.memory_store.ahas_source_hash(
+            if await memory_store.ahas_source_hash(
                 source.resolution_id,
                 source.source_hash,
                 refresh=True,
@@ -872,7 +900,7 @@ class FailureResolverProcessor:
                 self.state.resolutions_skipped += 1
                 commit_sha = self._known_commit_shas.get(
                     source.resolution_id
-                ) or await self.memory_store.alatest_memory_commit(
+                ) or await memory_store.alatest_memory_commit(
                     source.resolution_id,
                     refresh=False,
                 )
@@ -905,7 +933,7 @@ class FailureResolverProcessor:
                     "Generalized action evidence differs from the source"
                 )
             draft = _memory_draft(source, generalized)
-            result = await self.memory_store.awrite_memory(draft)
+            result = await memory_store.awrite_memory(draft)
             if result.changed:
                 self.state.memories_written += 1
                 self.state.last_memory_commit = result.commit_sha
@@ -1205,6 +1233,7 @@ class SupabaseAgentRuntime(SupabaseFailureObserver):
         *,
         agent: FailureAgent,
         memory_store: MarkdownMemoryStore,
+        dev_memory_store: MarkdownMemoryStore | None = None,
         client_factory: ClientFactory = create_supabase_client,
         recovery_coordinator: RecoveryCoordinator | None = None,
     ) -> None:
@@ -1218,6 +1247,7 @@ class SupabaseAgentRuntime(SupabaseFailureObserver):
             resolutions_table=settings.resolutions_table,
             agent=agent,
             memory_store=memory_store,
+            dev_memory_store=dev_memory_store,
         )
         self._resolution_channel: Any | None = None
         self._resolution_subscription_event = asyncio.Event()
@@ -2012,12 +2042,34 @@ def _default_memory_store_factory(
     )
 
 
+def _default_dev_memory_store_factory(
+    settings: ResolverSettings,
+) -> MarkdownMemoryStore | None:
+    # Same branch means one store; routing would be a no-op.
+    if settings.memory_repo_dev_branch == settings.memory_repo_branch:
+        return None
+    return GitMemoryStore(
+        GitMemoryConfig(
+            repo_url=settings.memory_repo_url,
+            # A branch needs its own checkout; sharing one working tree
+            # would thrash between branches on every operation.
+            repo_root=settings.memory_repo_root.with_name(
+                settings.memory_repo_root.name + "-dev"
+            ),
+            branch=settings.memory_repo_dev_branch,
+        )
+    )
+
+
 def create_app(
     *,
     settings: ResolverSettings | None = None,
     client_factory: ClientFactory = create_supabase_client,
     agent_factory: AgentFactory = _default_agent_factory,
     memory_store_factory: MemoryStoreFactory = _default_memory_store_factory,
+    dev_memory_store_factory: Callable[
+        [ResolverSettings], MarkdownMemoryStore | None
+    ] = _default_dev_memory_store_factory,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -2026,6 +2078,7 @@ def create_app(
             resolved_settings,
             agent=agent_factory(resolved_settings),
             memory_store=memory_store_factory(resolved_settings),
+            dev_memory_store=dev_memory_store_factory(resolved_settings),
             client_factory=client_factory,
         )
         application.state.resolver = runtime

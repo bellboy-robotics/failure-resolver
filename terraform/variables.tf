@@ -204,9 +204,9 @@ variable "memory_repo_url" {
 }
 
 variable "memory_repo_branch" {
-  description = "Branch the resolver pulls, commits to, and pushes."
+  description = "Branch for production-site memories (every site except 0)."
   type        = string
-  default     = "failure-resolver-dev"
+  default     = "main"
 
   validation {
     condition = (
@@ -215,6 +215,21 @@ variable "memory_repo_branch" {
       !strcontains(var.memory_repo_branch, "@{")
     )
     error_message = "memory_repo_branch must be a safe Git branch name."
+  }
+}
+
+variable "memory_repo_dev_branch" {
+  description = "Branch for dev-site memories (site_id 0 or unlocated)."
+  type        = string
+  default     = "failure-resolver-dev"
+
+  validation {
+    condition = (
+      can(regex("^[A-Za-z0-9][A-Za-z0-9._/-]*$", trimspace(var.memory_repo_dev_branch))) &&
+      !strcontains(var.memory_repo_dev_branch, "..") &&
+      !strcontains(var.memory_repo_dev_branch, "@{")
+    )
+    error_message = "memory_repo_dev_branch must be a safe Git branch name."
   }
 }
 

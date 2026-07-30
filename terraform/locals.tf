@@ -54,6 +54,10 @@ locals {
       value = var.memory_repo_branch
     },
     {
+      name  = "MEMORY_REPO_DEV_BRANCH"
+      value = var.memory_repo_dev_branch
+    },
+    {
       name  = "MEMORY_REPO_ROOT"
       value = "/var/lib/failure-resolver/repository"
     },
