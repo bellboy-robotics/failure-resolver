@@ -39,3 +39,4 @@ crash.*.log
 # Do NOT ignore these:
 # - memory/index.json
 # - memory/failures/*.md
+!terraform/ci.tfvars
