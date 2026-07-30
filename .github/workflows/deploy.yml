@@ -23,7 +23,7 @@ jobs:
       - name: Install runtime and test dependencies
         run: |
           pip install -r requirements-observer.txt
-          pip install -r requirements-observer-dev.txt
+          pip install -r requirements-observer-dev.txt python-dotenv
       # Three legacy suites have a known-broken async collection setup and
       # never ran in CI; they must not hold the deploy gate.
       - name: Run tests
