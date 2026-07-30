@@ -96,6 +96,7 @@ data "aws_iam_policy_document" "github_deploy" {
       "iam:GetRole",
       "iam:GetRolePolicy",
       "iam:GetOpenIDConnectProvider",
+      "iam:ListOpenIDConnectProviders",
       "iam:ListRolePolicies",
       "iam:ListAttachedRolePolicies",
       "iam:ListInstanceProfilesForRole",
