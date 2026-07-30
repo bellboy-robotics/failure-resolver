@@ -2,7 +2,9 @@ name: Deploy
 
 on:
   push:
-    branches: [failure-resolver-dev]
+    # Transitional dual trigger: an org admin still needs to flip the default
+    # branch to main; drop failure-resolver-dev here once that happens.
+    branches: [main, failure-resolver-dev]
 
 permissions:
   id-token: write

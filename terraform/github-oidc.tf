@@ -28,7 +28,10 @@ data "aws_iam_policy_document" "github_deploy_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:bellboy-robotics@198553348/failure-resolver@1314958623:ref:refs/heads/failure-resolver-dev"]
+      values = [
+        "repo:bellboy-robotics@198553348/failure-resolver@1314958623:ref:refs/heads/main",
+        "repo:bellboy-robotics@198553348/failure-resolver@1314958623:ref:refs/heads/failure-resolver-dev",
+      ]
     }
   }
 }
